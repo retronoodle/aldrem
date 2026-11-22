@@ -1,7 +1,7 @@
-/* mediaplayer — Phase 2: WAV playback engine wired to the Phase 1 layout.
- * A 900x520 window with Open (inert) + status, time label, read-only progress
- * slider, transport buttons and a disabled volume slider.
- * Esc quits (raw SDL event, matching the Phase 6 pattern).
+/* mediaplayer — Phase 3: seeking and accurate position on top of the Phase 2
+ * WAV engine and Phase 1 layout. Open (inert) + status, a previewing time
+ * label, a click/drag seek bar, transport buttons and a disabled volume
+ * slider. Arrow keys seek ±5 s. Esc quits (raw SDL event).
  */
 #include <math.h>
 #include <stdio.h>
@@ -117,6 +117,78 @@ ui_scale_mouse_event(SDL_Event *evt, float ratio)
     }
 }
 
+/* One row-sized seek bar. `frac` is 0..1. While dragging, writes the preview
+ * fraction and keeps it live; on mouse release returns 1 (caller seeks).
+ * Nuklear input is already in physical pixels, matching the layout rect. */
+static int
+ui_seek_bar(struct nk_context *ctx, float s, float frac,
+    int enabled, int *dragging, float *preview)
+{
+    struct nk_command_buffer *canvas;
+    struct nk_rect b;
+    float shown, bar_h, cy, cx, handle_w;
+    int released = 0;
+
+    if (nk_widget(&b, ctx) == NK_WIDGET_INVALID)
+        return 0;
+
+    /* nk_input_mouse_clicked fires on release, so start the drag on press:
+     * that keeps the preview live and ignores releases that began elsewhere. */
+    if (enabled && nk_input_is_mouse_pressed(&ctx->input, NK_BUTTON_LEFT) &&
+        nk_input_is_mouse_hovering_rect(&ctx->input, b)) {
+        *dragging = 1;
+        *preview = (ctx->input.mouse.pos.x - b.x) / b.w;
+    } else if (*dragging) {
+        if (!enabled) {
+            *dragging = 0;
+        } else if (nk_input_is_mouse_down(&ctx->input, NK_BUTTON_LEFT)) {
+            *preview = (ctx->input.mouse.pos.x - b.x) / b.w;
+        } else {
+            *dragging = 0;
+            released = 1;
+        }
+    }
+
+    if (*preview < 0.0f)
+        *preview = 0.0f;
+    if (*preview > 1.0f)
+        *preview = 1.0f;
+
+    shown = enabled ? (*dragging ? *preview : frac) : 0.0f;
+    if (shown < 0.0f)
+        shown = 0.0f;
+    if (shown > 1.0f)
+        shown = 1.0f;
+
+    canvas = nk_window_get_canvas(ctx);
+    bar_h = ui_s(4.0f, s);
+    if (bar_h < 1.0f)
+        bar_h = 1.0f;
+    cy = b.y + b.h * 0.5f;
+
+    nk_fill_rect(canvas, nk_rect(b.x, cy - bar_h * 0.5f, b.w, bar_h),
+        0.0f, nk_rgb(60, 60, 68));
+    if (shown > 0.0f)
+        nk_fill_rect(canvas, nk_rect(b.x, cy - bar_h * 0.5f, b.w * shown, bar_h),
+            0.0f, nk_rgb(110, 150, 230));
+
+    if (enabled) {
+        handle_w = ui_s(12.0f, s);
+        if (handle_w < 4.0f)
+            handle_w = 4.0f;
+        cx = b.x + b.w * shown - handle_w * 0.5f;
+        if (cx < b.x)
+            cx = b.x;
+        if (cx + handle_w > b.x + b.w)
+            cx = b.x + b.w - handle_w;
+        nk_fill_rect(canvas,
+            nk_rect(cx, cy - handle_w * 0.5f, handle_w, handle_w),
+            ui_s(2.0f, s), nk_rgb(220, 225, 235));
+    }
+
+    return released;
+}
+
 int
 main(int argc, char **argv)
 {
@@ -193,6 +265,10 @@ main(int argc, char **argv)
     }
 
     int running = 1;
+    int seek_dragging = 0;
+    float seek_preview = 0.0f;
+    double pending_seek = 0.0;
+
     while (running) {
         /* Derive sizes fresh each frame: the resize event values are points,
          * while Nuklear lays out in physical pixels. */
@@ -213,6 +289,12 @@ main(int argc, char **argv)
             } else if (evt.type == SDL_KEYDOWN &&
                        evt.key.keysym.scancode == SDL_SCANCODE_ESCAPE) {
                 running = 0;
+            } else if (evt.type == SDL_KEYDOWN &&
+                       evt.key.keysym.scancode == SDL_SCANCODE_LEFT) {
+                pending_seek -= 5.0;
+            } else if (evt.type == SDL_KEYDOWN &&
+                       evt.key.keysym.scancode == SDL_SCANCODE_RIGHT) {
+                pending_seek += 5.0;
             } else if (evt.type == SDL_WINDOWEVENT &&
                        (evt.window.event == SDL_WINDOWEVENT_RESIZED ||
                         evt.window.event == SDL_WINDOWEVENT_SIZE_CHANGED ||
@@ -232,11 +314,31 @@ main(int argc, char **argv)
         char volbuf[32];
         const char *status_text;
         float progress, volume;
+        double shown;
+
+        /* Coalesce arrow-key repeats into one decoder rebuild per frame; this
+         * runs before the status fetch so the label reflects the new position
+         * immediately. */
+        if (pending_seek != 0.0) {
+            playback_seek_relative(pending_seek);
+            pending_seek = 0.0;
+        }
 
         playback_get_status(&st);
 
+        /* A Stop or failed load while dragging must not leave a stale preview. */
+        if (!st.has_track)
+            seek_dragging = 0;
+
+        /* While dragging the label previews the target. The label is laid out
+         * before the bar in the same frame, so the preview is one frame old at
+         * most, which is imperceptible. */
+        shown = seek_dragging && st.duration > 0.0
+            ? (double)seek_preview * st.duration
+            : st.position;
+
         if (st.has_track) {
-            int cur = (int)st.position;
+            int cur = (int)shown;
             int dur = (int)st.duration;
             if (cur < 0)
                 cur = 0;
@@ -282,11 +384,12 @@ main(int argc, char **argv)
             nk_layout_row_dynamic(ctx, ui_s(35.0f, ui_scale), 1);
             nk_label(ctx, timebuf, NK_TEXT_CENTERED);
 
-            /* row 3: progress slider — tracks the playhead, non-draggable */
+            /* row 3: seek bar — click or drag to seek, released on mouse up */
             nk_layout_row_dynamic(ctx, ui_s(35.0f, ui_scale), 1);
-            nk_widget_disable_begin(ctx);
-            nk_slider_float(ctx, 0.0f, &progress, 1.0f, 0.01f);
-            nk_widget_disable_end(ctx);
+            if (ui_seek_bar(ctx, ui_scale, progress, st.has_track,
+                            &seek_dragging, &seek_preview)) {
+                playback_seek((double)seek_preview * st.duration);
+            }
 
             /* row 4: transport buttons, disabled until a track is loaded */
             nk_layout_row_dynamic(ctx, ui_s(35.0f, ui_scale), 3);

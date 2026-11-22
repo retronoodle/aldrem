@@ -9,7 +9,10 @@
  *   - A mutex guards only UI-facing metadata (name, duration, error).
  *
  * Deliberate departure from the PRD prose: shared audio state is atomic rather
- * than mutex-protected so the callback never blocks.
+ * than mutex-protected so the callback never blocks. Seeking follows the same
+ * rule: the UI thread pauses the device, joins the decoder, rebuilds the
+ * session from a new base position, then resumes. That costs a brief audible
+ * gap but never touches the callback path.
  */
 #include "playback.h"
 #include "track.h"
@@ -38,6 +41,10 @@ struct Playback {
     Track *track;
     TrackInfo info;
 
+    /* Seconds at the start of the current decoder session. Written only on the
+     * UI thread (load/stop/seek/EOF); position = base + frames_played/freq. */
+    double position_base;
+
     SDL_AudioStream *stream;
     SDL_Thread *thread;
     int thread_running;
@@ -60,6 +67,32 @@ static struct Playback g;
 static int dst_bytes_per_frame(const struct Playback *p)
 {
     return (int)sizeof(float) * p->have.channels;
+}
+
+/* Source frame index for a position in seconds, rounded and clamped to the
+ * track length. */
+static Uint32
+src_frame_for(const struct Playback *p, double seconds)
+{
+    double frame;
+
+    if (seconds <= 0.0 || p->info.src_spec.freq <= 0)
+        return 0;
+    frame = seconds * (double)p->info.src_spec.freq;
+    if (frame >= (double)p->info.total_frames)
+        return p->info.total_frames;
+    return (Uint32)(frame + 0.5);
+}
+
+/* Playhead as reported to the UI: session start offset plus frames the
+ * callback has consumed since then. */
+static double
+current_position(struct Playback *p)
+{
+    if (p->have.freq <= 0)
+        return p->position_base;
+    return p->position_base
+        + (double)SDL_AtomicGet(&p->frames_played) / (double)p->have.freq;
 }
 
 static void SDLCALL
@@ -245,6 +278,7 @@ stop_session(struct Playback *p)
     SDL_AtomicSet(&p->decoder_done, 0);
     SDL_AtomicSet(&p->eof, 0);
     SDL_AtomicSet(&p->state, MP_STOPPED);
+    p->position_base = 0.0;
 }
 
 static void
@@ -253,6 +287,43 @@ set_error(struct Playback *p, const char *msg)
     SDL_LockMutex(p->meta_mutex);
     snprintf(p->error, sizeof p->error, "%s", msg);
     SDL_UnlockMutex(p->meta_mutex);
+}
+
+/* Start a decoder session at position_base. The device must be paused and no
+ * decoder thread running: the ring is reset here. On failure the session stays
+ * stopped and the meta error is set for the UI. */
+static int
+start_session(struct Playback *p)
+{
+    SDL_AtomicSet(&p->quit_thread, 0);
+    SDL_AtomicSet(&p->decoder_done, 0);
+    SDL_AtomicSet(&p->eof, 0);
+    SDL_AtomicSet(&p->frames_played, 0);
+    SDL_AtomicSet(&p->rb_read, 0);
+    SDL_AtomicSet(&p->rb_write, 0);
+    track_seek(p->track, src_frame_for(p, p->position_base));
+
+    /* Rebuild rather than clear: a fresh stream also resets the resampler,
+     * which is what a seek wants. */
+    p->stream = SDL_NewAudioStream(p->info.src_spec.format,
+        p->info.src_spec.channels, p->info.src_spec.freq,
+        p->have.format, p->have.channels, p->have.freq);
+    if (!p->stream) {
+        SDL_Log("SDL_NewAudioStream failed: %s", SDL_GetError());
+        set_error(p, "cannot start audio conversion");
+        return -1;
+    }
+
+    p->thread = SDL_CreateThread(decoder_thread, "decoder", p);
+    if (!p->thread) {
+        SDL_Log("SDL_CreateThread failed: %s", SDL_GetError());
+        SDL_FreeAudioStream(p->stream);
+        p->stream = NULL;
+        set_error(p, "cannot start decoder thread");
+        return -1;
+    }
+    p->thread_running = 1;
+    return 0;
 }
 
 static void
@@ -412,36 +483,17 @@ playback_play(void)
         return;
     }
 
-    /* STOPPED: (re)build the session. The device is paused here, so it is
-     * safe to reset the ring. */
-    if (g.thread_running)
+    /* STOPPED: (re)build the session from position_base, which a seek made
+     * while stopped may have moved. The device is paused here, so it is safe
+     * to reset the ring. */
+    if (g.thread_running) {
+        double resume_at = g.position_base;
         stop_session(&g);
-
-    SDL_AtomicSet(&g.quit_thread, 0);
-    SDL_AtomicSet(&g.decoder_done, 0);
-    SDL_AtomicSet(&g.eof, 0);
-    SDL_AtomicSet(&g.frames_played, 0);
-    SDL_AtomicSet(&g.rb_read, 0);
-    SDL_AtomicSet(&g.rb_write, 0);
-    track_seek(g.track, 0);
-
-    g.stream = SDL_NewAudioStream(g.info.src_spec.format, g.info.src_spec.channels,
-        g.info.src_spec.freq, g.have.format, g.have.channels, g.have.freq);
-    if (!g.stream) {
-        SDL_Log("SDL_NewAudioStream failed: %s", SDL_GetError());
-        set_error(&g, "cannot start audio conversion");
-        return;
+        g.position_base = resume_at;
     }
 
-    g.thread = SDL_CreateThread(decoder_thread, "decoder", &g);
-    if (!g.thread) {
-        SDL_Log("SDL_CreateThread failed: %s", SDL_GetError());
-        SDL_FreeAudioStream(g.stream);
-        g.stream = NULL;
-        set_error(&g, "cannot start decoder thread");
+    if (start_session(&g) != 0)
         return;
-    }
-    g.thread_running = 1;
 
     SDL_AtomicSet(&g.state, MP_PLAYING);
     SDL_PauseAudioDevice(g.dev, 0);
@@ -464,6 +516,56 @@ playback_stop(void)
     if (!g.inited)
         return;
     stop_session(&g);
+}
+
+int
+playback_seek(double seconds)
+{
+    PlaybackState prev;
+    double dur;
+
+    if (!g.inited || !g.dev_open || !g.track)
+        return -1;
+
+    SDL_LockMutex(g.meta_mutex);
+    dur = g.duration;
+    SDL_UnlockMutex(g.meta_mutex);
+
+    if (seconds < 0.0)
+        seconds = 0.0;
+    if (seconds > dur)
+        seconds = dur;
+
+    prev = (PlaybackState)SDL_AtomicGet(&g.state);
+
+    if (prev == MP_STOPPED && !g.thread_running) {
+        /* The device stays paused: this only moves the point Play starts at. */
+        g.position_base = seconds;
+        track_seek(g.track, src_frame_for(&g, seconds));
+        return 0;
+    }
+
+    /* Playing and paused both run the device. Stop the session, move the
+     * start offset and rebuild it; a brief audible gap is the accepted cost of
+     * seeking without a callback-side gate. */
+    stop_session(&g);
+    g.position_base = seconds;
+    if (start_session(&g) != 0) {
+        SDL_AtomicSet(&g.state, MP_STOPPED);
+        return -1;
+    }
+
+    SDL_AtomicSet(&g.state, prev == MP_PLAYING ? MP_PLAYING : MP_PAUSED);
+    SDL_PauseAudioDevice(g.dev, 0);
+    return 0;
+}
+
+int
+playback_seek_relative(double delta)
+{
+    if (!g.inited || !g.dev_open || !g.track)
+        return -1;
+    return playback_seek(current_position(&g) + delta);
 }
 
 void
@@ -492,9 +594,7 @@ playback_get_status(PlaybackStatus *out)
         stop_session(&g);
 
     out->state = (PlaybackState)SDL_AtomicGet(&g.state);
-    out->position = g.have.freq > 0
-        ? (double)SDL_AtomicGet(&g.frames_played) / (double)g.have.freq
-        : 0.0;
+    out->position = current_position(&g);
     out->volume_percent = g.volume_percent;
 
     SDL_LockMutex(g.meta_mutex);

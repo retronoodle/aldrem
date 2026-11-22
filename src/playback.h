@@ -27,6 +27,14 @@ int  playback_load(const char *path, char *err, size_t errlen);
 void playback_play(void);
 void playback_pause(void);
 void playback_stop(void);
+
+/* Moves the playhead to seconds, clamped to [0, duration]. Seeking while
+ * playing or paused rebuilds the session; while stopped it only sets the point
+ * Play will start at. Returns 0 on success, -1 if there is no track. */
+int  playback_seek(double seconds);
+/* Seek from the current position; see playback_seek. */
+int  playback_seek_relative(double delta);
+
 void playback_set_volume(int percent);
 void playback_get_status(PlaybackStatus *out);
 
