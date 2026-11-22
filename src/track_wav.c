@@ -3,17 +3,28 @@
  * the authoritative format; block_align is derived from it, never from the
  * file header.
  */
-#include "track.h"
+#include "track_internal.h"
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
 struct Track {
+    TrackBase base;
     Uint8 *data;
     Uint32 len;
     Uint32 cursor;
     Uint32 block_align;
+};
+
+static int wav_decode_chunk(Track *t, Uint8 *dst, int cap);
+static int wav_seek(Track *t, Uint32 frame);
+static void wav_close(Track *t);
+
+static const TrackOps wav_ops = {
+    .decode_chunk = wav_decode_chunk,
+    .seek = wav_seek,
+    .close = wav_close,
 };
 
 static int
@@ -37,7 +48,7 @@ format_supported(SDL_AudioFormat format)
 }
 
 Track *
-track_open(const char *path, TrackInfo *info, char *err, size_t errlen)
+track_wav_open(const char *path, TrackInfo *info, char *err, size_t errlen)
 {
     SDL_AudioSpec spec;
     Uint8 *buf = NULL;
@@ -85,14 +96,15 @@ track_open(const char *path, TrackInfo *info, char *err, size_t errlen)
     t->len = len;
     t->cursor = 0;
     t->block_align = block_align;
+    t->base.ops = &wav_ops;
 
     info->src_spec = spec;
     info->total_frames = len / block_align;
     return t;
 }
 
-int
-track_decode_chunk(Track *t, Uint8 *dst, int cap)
+static int
+wav_decode_chunk(Track *t, Uint8 *dst, int cap)
 {
     Uint32 remaining, want;
 
@@ -114,8 +126,8 @@ track_decode_chunk(Track *t, Uint8 *dst, int cap)
     return (int)want;
 }
 
-int
-track_seek(Track *t, Uint32 frame)
+static int
+wav_seek(Track *t, Uint32 frame)
 {
     Uint32 total;
 
@@ -128,8 +140,8 @@ track_seek(Track *t, Uint32 frame)
     return 0;
 }
 
-void
-track_close(Track *t)
+static void
+wav_close(Track *t)
 {
     if (!t)
         return;

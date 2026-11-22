@@ -1,0 +1,24 @@
+/* track_internal.h — plumbing shared by the track dispatcher and the
+ * per-format implementations. Not part of the public API.
+ */
+#ifndef TRACK_INTERNAL_H
+#define TRACK_INTERNAL_H
+
+#include "track.h"
+
+/* Per-format implementation entry points. Each implementation stores a
+ * pointer to its ops as the first member of its own struct Track. */
+typedef struct TrackOps {
+    int  (*decode_chunk)(Track *, Uint8 *, int);
+    int  (*seek)(Track *, Uint32);
+    void (*close)(Track *);
+} TrackOps;
+
+typedef struct {
+    const TrackOps *ops;
+} TrackBase;
+
+Track *track_wav_open(const char *path, TrackInfo *info, char *err, size_t errlen);
+Track *track_mp3_open(const char *path, TrackInfo *info, char *err, size_t errlen);
+
+#endif

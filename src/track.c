@@ -1,0 +1,130 @@
+/* track.c — format detection and dispatch to the per-format implementation.
+ * The public API lives here; the implementations only fill a TrackOps vtable.
+ */
+#include "track_internal.h"
+
+#include <stdio.h>
+#include <string.h>
+
+enum { SNIFF_UNKNOWN, SNIFF_WAV, SNIFF_MP3, SNIFF_IOERR };
+
+static const TrackOps *
+ops_of(Track *t)
+{
+    return t ? ((TrackBase *)t)->ops : NULL;
+}
+
+int
+track_decode_chunk(Track *t, Uint8 *dst, int cap)
+{
+    const TrackOps *ops = ops_of(t);
+
+    if (!ops || !ops->decode_chunk)
+        return -1;
+    return ops->decode_chunk(t, dst, cap);
+}
+
+int
+track_seek(Track *t, Uint32 frame)
+{
+    const TrackOps *ops = ops_of(t);
+
+    if (!ops || !ops->seek)
+        return -1;
+    return ops->seek(t, frame);
+}
+
+void
+track_close(Track *t)
+{
+    const TrackOps *ops = ops_of(t);
+
+    if (ops && ops->close)
+        ops->close(t);
+}
+
+/* Case-insensitive comparison of the part after the last '.' in the path
+ * (which must be in the basename). No POSIX strcasecmp: this stays portable. */
+static int
+ext_is(const char *path, const char *ext)
+{
+    const char *dot = strrchr(path, '.');
+    const char *slash = strrchr(path, '/');
+    size_t i;
+
+    if (!dot || (slash && dot < slash))
+        return 0;
+    for (i = 0; ext[i]; i++) {
+        char c = dot[i + 1];
+
+        if (c >= 'A' && c <= 'Z')
+            c = (char)(c - 'A' + 'a');
+        if (c != ext[i])
+            return 0;
+    }
+    return dot[i + 1] == '\0';
+}
+
+/* Reads the first bytes to identify a file whose extension says nothing. */
+static int
+sniff(const char *path)
+{
+    Uint8 buf[12];
+    size_t n;
+    int failed;
+    FILE *fp = fopen(path, "rb");
+
+    if (!fp)
+        return SNIFF_IOERR;
+    n = fread(buf, 1, sizeof buf, fp);
+    failed = ferror(fp);
+    fclose(fp);
+    if (failed)
+        return SNIFF_IOERR;
+
+    if (n >= 12 && memcmp(buf, "RIFF", 4) == 0 && memcmp(buf + 8, "WAVE", 4) == 0)
+        return SNIFF_WAV;
+
+    if (n >= 3 && memcmp(buf, "ID3", 3) == 0)
+        return SNIFF_MP3;
+
+    /* MPEG audio sync: 11 set bits, no reserved version or layer. */
+    if (n >= 2 && buf[0] == 0xff && (buf[1] & 0xe0) == 0xe0
+        && (buf[1] & 0x18) != 0x08 && (buf[1] & 0x06) != 0x00)
+        return SNIFF_MP3;
+
+    return SNIFF_UNKNOWN;
+}
+
+Track *
+track_open(const char *path, TrackInfo *info, char *err, size_t errlen)
+{
+    if (!path || !info) {
+        if (err && errlen)
+            snprintf(err, errlen, "invalid arguments");
+        return NULL;
+    }
+
+    /* A known extension is authoritative: no cross-format fallback, so a
+     * mislabelled file fails loudly instead of decoding as something else. */
+    if (ext_is(path, "wav"))
+        return track_wav_open(path, info, err, errlen);
+    if (ext_is(path, "mp3"))
+        return track_mp3_open(path, info, err, errlen);
+
+    switch (sniff(path)) {
+    case SNIFF_WAV:
+        return track_wav_open(path, info, err, errlen);
+    case SNIFF_MP3:
+        return track_mp3_open(path, info, err, errlen);
+    case SNIFF_IOERR:
+        if (err && errlen)
+            snprintf(err, errlen, "cannot open '%s'", path);
+        return NULL;
+    default:
+        if (err && errlen)
+            snprintf(err, errlen, "unsupported file type '%s': expected .wav or .mp3",
+                     path);
+        return NULL;
+    }
+}
