@@ -155,6 +155,7 @@ Each phase is a self-contained feature sized for one AI work session. Build them
 - Space = play/pause; make sure widget focus doesn't swallow Space (use raw SDL key events, not Nuklear input for the global shortcuts).
 - Idle/empty state: centered hint text ("drop a .wav or .mp3 here").
 - Status label surfacing: format/sample rate/channels of the loaded file.
+- Native HiDPI rendering (sharp fonts/layout at Retina backing scale) with the slightly denser UI applied.
 - End-to-end pass: long-file memory stability (watch RSS while looping a 1-hour file for a few minutes), quit-during-playback cleanliness, resize-while-playing.
 
 **Done when:** All 9 functional requirements demonstrably pass; a 15-minute manual session (load, seek around, pause, switch files, quit) hits zero errors or warnings.
