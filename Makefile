@@ -2,13 +2,19 @@ CC      := clang
 CFLAGS  ?= -std=c99 -Wall -Wextra -O2 -Ivendor $(shell pkg-config --cflags sdl2)
 LDLIBS  := $(shell pkg-config --libs sdl2)
 
-mediaplayer: src/main.c vendor/nuklear.h vendor/nuklear_sdl_renderer.h
-	$(CC) $(CFLAGS) -o $@ src/main.c $(LDLIBS)
+SRC := src/main.c src/playback.c src/track_wav.c
+OBJ := $(SRC:.c=.o)
+HDR := src/playback.h src/track.h vendor/nuklear.h vendor/nuklear_sdl_renderer.h
+
+mediaplayer: $(OBJ)
+	$(CC) $(CFLAGS) -o $@ $(OBJ) $(LDLIBS)
+
+$(OBJ): $(HDR)
 
 run: mediaplayer
 	./mediaplayer
 
 clean:
-	rm -f mediaplayer
+	rm -f $(OBJ) mediaplayer
 
 .PHONY: run clean
