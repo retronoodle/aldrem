@@ -26,6 +26,12 @@ struct VizView {
     SDL_Texture *fractal;       /* streaming texture, NULL if unavailable */
     double t;                   /* animation clock, seconds */
     float bass, mid;            /* band energy driving the fractal, 0..1 */
+    float treble;               /* top-quarter band energy, 0..1 */
+    float bass_avg;             /* slow bass average the beat tracker uses */
+    float kick;                 /* beat envelope, 0..1, jumps on bass onsets */
+    float mid_avg;              /* slow mid average: what counts as a swell */
+    float mid_env;              /* mid swell envelope: the entity's presence */
+    float trail_decay;          /* per-frame keep factor for fractal trails */
     struct MpAnim mode_anim[VIZ_MODE_COUNT];
     struct MpAnim fs_anim;
 };
@@ -62,7 +68,7 @@ viz_view_update(VizView *v, const VizSettings *s, float dt, int active,
                 int reduce_motion)
 {
     int nb = s->bars, q, h, i;
-    float sum_bass = 0.0f, sum_mid = 0.0f;
+    float sum_bass = 0.0f, sum_mid = 0.0f, sum_treble = 0.0f;
 
     /* Hidden views do no work: no sample copy, no FFT, no clock. */
     if (!active)
@@ -85,51 +91,138 @@ viz_view_update(VizView *v, const VizSettings *s, float dt, int active,
         sum_mid += v->bars[i];
     v->bass = q ? sum_bass / (float)q : 0.0f;
     v->mid = (h > q) ? sum_mid / (float)(h - q) : 0.0f;
-    if (reduce_motion)
-        v->bass = v->mid = 0.0f; /* fractal holds still without audio drive */
+
+    /* Treble is the top quarter of the bars. */
+    for (i = nb - q; i < nb; ++i)
+        sum_treble += v->bars[i];
+    v->treble = q ? sum_treble / (float)q : 0.0f;
+    viz_beat(&v->bass_avg, &v->kick, v->bass, dt);
+
+    /* The entity follows swells: mid energy rising above its own slow average,
+     * which is what a vocal or a solo does. A held note settles back to
+     * nothing, so the creature pulses with the phrasing instead of sitting on. */
+    {
+        const float ka = 1.0f - expf(-dt * 0.5f);
+        float rise = (v->mid - v->mid_avg) * 4.0f;
+        float k;
+
+        rise = rise < 0.0f ? 0.0f : (rise > 1.0f ? 1.0f : rise);
+        v->mid_avg += (v->mid - v->mid_avg) * ka;
+        k = rise > v->mid_env ? 0.6f : 1.0f - expf(-dt * 1.5f);
+        v->mid_env += (rise - v->mid_env) * k;
+    }
+    v->trail_decay = expf(-dt * 5.0f);
+
+    if (reduce_motion) {
+        /* Fractal holds still without audio drive; the creature sits at its
+         * resting shape, since it has no swell to follow. */
+        v->bass = v->mid = 0.0f;
+        v->treble = v->kick = v->mid_env = 0.0f;
+    }
 }
 
-/* Fills the fractal pixel buffer with a Julia set, then uploads it. */
+/* Fractal look. The Julia layer is rippled by the treble and folded into a
+ * kaleidoscope; a Phoenix creature sits on top, always present and reshaped by
+ * the clock and the mids; each frame keeps a fading copy of the last one. */
+#define KALEIDO_SEGS 6
+#define PHX_CR        0.56667f /* Phoenix base constant */
+#define PHX_CI        0.0f
+#define PHX_HALF      1.6f     /* half-height of the Phoenix view */
+#define HUE_DRIFT     0.02f /* palette turns per second */
+#define RIPPLE_AMP    0.04f
+
+/* Colour for an escape count. mu < 0 is inside the set, drawn black. */
+static void
+mu_rgb(float mu, float hue, float *r, float *g, float *b)
+{
+    unsigned char hr, hg, hb;
+    float lift;
+
+    if (mu < 0.0f) {
+        *r = *g = *b = 0.0f;
+        return;
+    }
+    lift = sqrtf(mu / FRACTAL_ITER);
+    viz_hue_rgb(hue + mu / FRACTAL_ITER * 1.2f, &hr, &hg, &hb);
+    *r = hr * lift;
+    *g = hg * lift;
+    *b = hb * lift;
+}
+
+/* Fills the fractal pixel buffer, then uploads it. */
 static void
 fractal_render(VizView *v, const VizSettings *s)
 {
-    float cr, ci, zoom;
+    const float aspect = (float)FRACTAL_W / (float)FRACTAL_H;
+    const float t = (float)v->t;
+    const float hue = (float)s->hue_pct / 100.0f + t * HUE_DRIFT;
+    /* The creature always lives on the clock, so it keeps morphing with no
+     * audio (paused, silence). Its memory term p reshapes it continuously;
+     * music pushes p further and brightens it. */
+    const float breathe = 0.5f + 0.5f * sinf(t * 0.35f);
+    const float p = -0.5f + 0.25f * sinf(t * 0.37f) + 0.2f * v->mid_env;
+    const float phx_cr = PHX_CR + 0.05f * sinf(t * 0.23f) + 0.05f * v->mid_env;
+    const float phx_ci = PHX_CI + 0.08f * cosf(t * 0.31f);
+    /* The view wanders across the plane, so the shape keeps changing. */
+    const float phx_cx = 0.3f * sinf(t * 0.2f);
+    const float phx_cy = 0.25f * cosf(t * 0.17f);
+    const float phx_half = PHX_HALF * (1.0f - 0.3f * breathe - 0.3f * v->mid_env);
+    float mask = 0.35f + 0.65f * v->mid_env;
+    float cr, ci, cx, cy, zoom;
     int x, y;
 
+    /* Smoothstep: the entity fades in and out rather than popping. */
+    mask = mask < 0.0f ? 0.0f : (mask > 1.0f ? 1.0f : mask);
+    mask = mask * mask * (3.0f - 2.0f * mask);
+
     viz_fractal_c(v->bass, v->mid, v->t, &cr, &ci);
-    zoom = 1.0f - 0.25f * v->bass;
+    viz_drift(v->t, &cx, &cy, &zoom);
+    zoom *= (1.0f - 0.25f * v->bass) * (1.0f - 0.35f * v->kick);
 
     for (y = 0; y < FRACTAL_H; ++y) {
-        const float im = ((float)y / FRACTAL_H - 0.5f) * 2.0f * zoom;
+        const float w = ((float)y / FRACTAL_H - 0.5f) * 2.0f;
 
         for (x = 0; x < FRACTAL_W; ++x) {
-            const float re = ((float)x / FRACTAL_W - 0.5f) * 2.0f * zoom
-                * ((float)FRACTAL_W / FRACTAL_H);
-            float zx = re, zy = im, nz;
-            int n = 0;
-            unsigned int px;
+            const float u = ((float)x / FRACTAL_W - 0.5f) * 2.0f;
+            const float re = cx + u * zoom * aspect;
+            const float im = cy + w * zoom;
+            const float amp = RIPPLE_AMP * v->treble * zoom;
+            const float rre = re + amp * sinf(im * 9.0f + t * 1.7f);
+            const float rim = im + amp * sinf(re * 7.0f - t * 1.3f);
+            const size_t idx = (size_t)y * FRACTAL_W + (size_t)x;
+            float fre, fim, r, g, b, sr, sg, sb, pr, pg, pb;
+            unsigned int prev;
 
-            while (n < FRACTAL_ITER && zx * zx + zy * zy < 4.0f) {
-                nz = zx * zx - zy * zy + cr;
-                zy = 2.0f * zx * zy + ci;
-                zx = nz;
-                ++n;
-            }
-            if (n == FRACTAL_ITER) {
-                px = 0xFF000000u; /* inside the set: black */
-            } else {
-                unsigned char r, g, b;
-                const float hue = (float)s->hue_pct / 100.0f
-                    + (float)n / FRACTAL_ITER * 1.2f;
-                const float lift = sqrtf((float)n / FRACTAL_ITER);
+            viz_kaleido(rre, rim, KALEIDO_SEGS, t * 0.05f, &fre, &fim);
+            mu_rgb(viz_julia_mu(fre, fim, cr, ci, FRACTAL_ITER), hue,
+                   &r, &g, &b);
 
-                viz_hue_rgb(hue, &r, &g, &b);
-                px = 0xFF000000u
-                    | ((unsigned)(r * lift) << 16)
-                    | ((unsigned)(g * lift) << 8)
-                    | (unsigned)(b * lift);
+            if (mask > 0.01f) {
+                mu_rgb(viz_phoenix_mu(phx_cx + u * phx_half * aspect,
+                                      phx_cy + w * phx_half, phx_cr, phx_ci,
+                                      p, FRACTAL_ITER),
+                       hue + 0.5f, &sr, &sg, &sb);
+                r += mask * sr;
+                g += mask * sg;
+                b += mask * sb;
             }
-            v->pixels[y * FRACTAL_W + x] = px;
+            r = fminf(r, 255.0f);
+            g = fminf(g, 255.0f);
+            b = fminf(b, 255.0f);
+
+            /* Trails: keep the brighter of this frame and a faded last frame. */
+            prev = v->pixels[idx];
+            pr = (float)((prev >> 16) & 0xFFu) * v->trail_decay;
+            pg = (float)((prev >> 8) & 0xFFu) * v->trail_decay;
+            pb = (float)(prev & 0xFFu) * v->trail_decay;
+            r = fmaxf(r, pr);
+            g = fmaxf(g, pg);
+            b = fmaxf(b, pb);
+
+            v->pixels[idx] = 0xFF000000u
+                | ((unsigned)r << 16)
+                | ((unsigned)g << 8)
+                | (unsigned)b;
         }
     }
     SDL_UpdateTexture(v->fractal, NULL, v->pixels, FRACTAL_W * 4);

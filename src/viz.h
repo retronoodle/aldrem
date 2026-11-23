@@ -43,4 +43,28 @@ void viz_hue_rgb(float hue, unsigned char *r, unsigned char *g, unsigned char *b
  * 0..1 and a running time in seconds. */
 void viz_fractal_c(float bass, float mid, double t, float *cr, float *ci);
 
+/* Smooth escape count for colouring: n iterations and |z| at escape give a
+ * fractional value, so colour bands blend instead of stepping. */
+float viz_smooth_mu(int n, float zx, float zy);
+
+/* Julia iteration from z0 with constant c. Returns the smooth escape count, or
+ * -1 if the point stays bounded for iter steps (inside the set). */
+float viz_julia_mu(float zx, float zy, float cr, float ci, int iter);
+
+/* Phoenix iteration from z0 with constants c and p (the memory term). Same
+ * return convention as viz_julia_mu. */
+float viz_phoenix_mu(float zx, float zy, float cr, float ci, float p, int iter);
+
+/* Folds the plane into segs mirrored wedges around the origin (segs >= 1),
+ * with the wedges rotated by rot radians. Radius is preserved. */
+void viz_kaleido(float re, float im, int segs, float rot, float *ore, float *oim);
+
+/* View centre and zoom for the fractal drifting toward the seahorse valley and
+ * back, one cycle every 20 s. zoom stays within 1/64..1. */
+void viz_drift(double t, float *cx, float *cy, float *zoom);
+
+/* Beat tracker. avg is a slow bass average and kick a 0..1 envelope that jumps
+ * on a bass onset and decays. Both are updated in place. Call once per frame. */
+void viz_beat(float *avg, float *kick, float bass, float dt);
+
 #endif

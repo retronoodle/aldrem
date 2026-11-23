@@ -180,3 +180,105 @@ viz_fractal_c(float bass, float mid, double t, float *cr, float *ci)
     *cr = -0.7f + 0.25f * (float)sin(t * 0.31) + 0.12f * bass;
     *ci = 0.27f + 0.20f * (float)cos(t * 0.23) + 0.10f * mid;
 }
+
+/* Seahorse valley, a boundary point where the Mandelbrot detail is rich. */
+#define SEAHORSE_RE -0.7436438870f
+#define SEAHORSE_IM  0.1318259043f
+
+float
+viz_smooth_mu(int n, float zx, float zy)
+{
+    float mod = sqrtf(zx * zx + zy * zy);
+
+    if (mod < 2.0f)
+        mod = 2.0f; /* only called on escape, so |z| >= 2 already */
+    float mu = (float)n + 1.0f - log2f(log2f(mod));
+
+    /* Far escapes can dip below zero; keep 0 as the floor so a negative value
+     * can only mean "inside the set". */
+    return mu < 0.0f ? 0.0f : mu;
+}
+
+float
+viz_julia_mu(float zx, float zy, float cr, float ci, int iter)
+{
+    int n = 0;
+    float nz;
+
+    while (n < iter && zx * zx + zy * zy < 4.0f) {
+        nz = zx * zx - zy * zy + cr;
+        zy = 2.0f * zx * zy + ci;
+        zx = nz;
+        ++n;
+    }
+    if (zx * zx + zy * zy < 4.0f)
+        return -1.0f;
+    return viz_smooth_mu(n, zx, zy);
+}
+
+float
+viz_phoenix_mu(float zx, float zy, float cr, float ci, float p, int iter)
+{
+    /* Phoenix: z_{n+1} = z_n^2 + c + p * z_{n-1}, with z_{-1} = 0. The p term
+     * is what gives the feathered, wing-like shapes. */
+    float px = 0.0f, py = 0.0f;
+    int n = 0;
+
+    while (n < iter && zx * zx + zy * zy < 4.0f) {
+        const float nx = zx * zx - zy * zy + cr + p * px;
+        const float ny = 2.0f * zx * zy + ci + p * py;
+        px = zx;
+        py = zy;
+        zx = nx;
+        zy = ny;
+        ++n;
+    }
+    if (zx * zx + zy * zy < 4.0f)
+        return -1.0f;
+    return viz_smooth_mu(n, zx, zy);
+}
+
+void
+viz_kaleido(float re, float im, int segs, float rot, float *ore, float *oim)
+{
+    const float seg = 2.0f * PI_F / (float)(segs < 1 ? 1 : segs);
+    const float r = sqrtf(re * re + im * im);
+    float a = atan2f(im, re) - rot;
+
+    a -= floorf(a / seg) * seg; /* 0..seg */
+    if (a > 0.5f * seg)
+        a = seg - a; /* mirror the upper half of the wedge */
+    a += rot;
+    *ore = r * cosf(a);
+    *oim = r * sinf(a);
+}
+
+void
+viz_drift(double t, float *cx, float *cy, float *zoom)
+{
+    const double phase = fmod(t * 0.05, 1.0);
+    const float tri = 1.0f - fabsf(2.0f * (float)phase - 1.0f); /* 0..1..0 */
+    const float ease = tri * tri * (3.0f - 2.0f * tri);
+
+    *zoom = exp2f(-6.0f * tri);
+    *cx = SEAHORSE_RE * ease;
+    *cy = SEAHORSE_IM * ease;
+}
+
+void
+viz_beat(float *avg, float *kick, float bass, float dt)
+{
+    const float ka = 1.0f - expf(-dt * 2.0f); /* roughly half a second */
+    /* Only a rise well above the running average counts as an onset. */
+    float excess = (bass - *avg - 0.12f) * 4.0f;
+
+    if (excess < 0.0f)
+        excess = 0.0f;
+    if (excess > 1.0f)
+        excess = 1.0f;
+    *avg += (bass - *avg) * ka;
+    if (excess > *kick)
+        *kick = excess;
+    else
+        *kick *= expf(-dt * 6.0f);
+}

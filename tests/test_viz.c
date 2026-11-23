@@ -121,6 +121,67 @@ main(void)
     viz_fractal_c(1.0f, 1.0f, 12.3, &cr, &ci);
     CHECK(fabsf(cr) < 1.0f && fabsf(ci) < 1.0f, "fractal c stays bounded under load");
 
+    /* Smooth escape count: |z| = 2 gives n + 1, |z| = 4 gives n. */
+    CHECK(fabsf(viz_smooth_mu(5, 2.0f, 0.0f) - 6.0f) < 1e-4f, "smooth mu at |z|=2");
+    CHECK(fabsf(viz_smooth_mu(5, 4.0f, 0.0f) - 5.0f) < 1e-4f, "smooth mu at |z|=4");
+    CHECK(viz_smooth_mu(0, 1000.0f, 0.0f) >= 0.0f, "smooth mu never negative");
+
+    /* Julia and Phoenix: the origin with c = 0 stays bounded (inside);
+     * a far point escapes with a non-negative count. */
+    CHECK(viz_julia_mu(0.0f, 0.0f, 0.0f, 0.0f, 40) < 0.0f, "julia origin is inside");
+    CHECK(viz_julia_mu(10.0f, 0.0f, 0.0f, 0.0f, 40) >= 0.0f, "julia far point escapes");
+    CHECK(viz_phoenix_mu(0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 40) < 0.0f, "phoenix origin is inside");
+    CHECK(viz_phoenix_mu(3.0f, 0.0f, 0.0f, 0.0f, -0.5f, 40) >= 0.0f, "phoenix far point escapes");
+
+    /* Kaleidoscope: periodic in the wedge angle, mirror-symmetric, radius kept. */
+    {
+        const float seg = 2.0f * 3.14159265f / 6.0f;
+        float a1x, a1y, a2x, a2y, a3x, a3y;
+        viz_kaleido(2.0f * cosf(0.3f), 2.0f * sinf(0.3f), 6, 0.0f, &a1x, &a1y);
+        viz_kaleido(2.0f * cosf(0.3f + seg), 2.0f * sinf(0.3f + seg), 6, 0.0f, &a2x, &a2y);
+        viz_kaleido(2.0f * cosf(-0.3f), 2.0f * sinf(-0.3f), 6, 0.0f, &a3x, &a3y);
+        CHECK(fabsf(a1x - a2x) < 1e-4f && fabsf(a1y - a2y) < 1e-4f, "kaleido is periodic per wedge");
+        CHECK(fabsf(a1x - a3x) < 1e-4f && fabsf(a1y - a3y) < 1e-4f, "kaleido mirrors the wedge");
+        CHECK(fabsf(sqrtf(a1x * a1x + a1y * a1y) - 2.0f) < 1e-4f, "kaleido keeps radius");
+    }
+
+    /* Drift: zoom stays in 1/64..1, starts at 1, reaches the deep end, and moves
+     * smoothly with no jumps. */
+    {
+        float cx, cy, z, prev_z = 0.0f, max_step = 0.0f;
+        double tt;
+        int bad = 0;
+        viz_drift(0.0, &cx, &cy, &z);
+        CHECK(fabsf(z - 1.0f) < 1e-5f && fabsf(cx) < 1e-6f, "drift starts at full view");
+        viz_drift(10.0, &cx, &cy, &z);
+        CHECK(fabsf(z - 1.0f / 64.0f) < 1e-5f, "drift reaches deep zoom at half cycle");
+        for (tt = 0.0; tt < 40.0; tt += 0.01) {
+            viz_drift(tt, &cx, &cy, &z);
+            if (z < 1.0f / 64.0f - 1e-5f || z > 1.0f + 1e-5f)
+                bad++;
+            if (tt > 0.0 && fabsf(z - prev_z) > max_step)
+                max_step = fabsf(z - prev_z);
+            prev_z = z;
+        }
+        CHECK(bad == 0, "drift zoom stays in range");
+        CHECK(max_step < 0.01f, "drift zoom is continuous");
+    }
+
+    /* Beat: a steady bass leaves no kick; an onset jumps it and it decays. */
+    {
+        float avg = 0.2f, kick = 0.0f;
+        int i;
+        for (i = 0; i < 120; ++i)
+            viz_beat(&avg, &kick, 0.2f, 1.0f / 60.0f);
+        CHECK(kick < 0.01f, "steady bass gives no kick");
+        viz_beat(&avg, &kick, 0.9f, 1.0f / 60.0f);
+        CHECK(kick > 0.5f, "bass onset jumps the kick");
+        CHECK(kick <= 1.0f, "kick stays in 0..1");
+        for (i = 0; i < 60; ++i)
+            viz_beat(&avg, &kick, 0.9f, 1.0f / 60.0f);
+        CHECK(kick < 0.05f, "kick decays after a second");
+    }
+
     if (failures) {
         fprintf(stderr, "test_viz: %d failure(s)\n", failures);
         return 1;
