@@ -251,6 +251,27 @@ enum {
     PL_ACTION_SAVE_AS   = 1 << 1
 };
 
+/* The content column inside the root window: 720 pt wide at most, centred,
+ * with a 24 pt margin either side that shrinks so a narrow window still fills
+ * the column without clipping the dock. `frame` is the window's content
+ * region, which already has padding applied. */
+static struct nk_rect
+ui_column(struct nk_rect frame, float scale)
+{
+    float margin = mp_s(24.0f, scale);
+    float max_w = mp_s(720.0f, scale);
+    float w;
+
+    if (margin > frame.w * 0.5f)
+        margin = frame.w * 0.5f;
+    w = frame.w - 2.0f * margin;
+    if (w < 0.0f)
+        w = 0.0f;
+    if (w > max_w)
+        w = max_w;
+    return nk_rect(frame.x + (frame.w - w) * 0.5f, frame.y, w, frame.h);
+}
+
 /* The whole playlist band: heading, toolbar, scrolling rows. Returns toolbar
  * actions whose consequences live in main() (browser/modal state). Remove,
  * Clear and double-click are applied after the row loop so the array that
@@ -375,6 +396,76 @@ ui_playlist_panel(Playlist *pl, struct nk_context *ctx, float scale,
         last_click = -1;
     }
     return actions;
+}
+
+/* Time, seek, transport and volume, gathered inside the dock panel. Returns
+ * the pending seek (seconds) when the seek bar was released, else 0; every
+ * other action is applied here through the same calls as before. */
+static double
+ui_transport_panel(struct nk_context *ctx, float scale, const struct MpTheme *th,
+    const PlaybackStatus *st, Playlist *pl, int modal_active,
+    const char *timebuf, float progress, const char *volbuf,
+    int *seek_dragging, float *seek_preview)
+{
+    double seek = 0.0;
+    float volume = (float)st->volume_percent / 100.0f;
+    int slider_live;
+
+    nk_layout_row_dynamic(ctx, mp_s(35.0f, scale), 1);
+    nk_label(ctx, timebuf, NK_TEXT_CENTERED);
+
+    nk_layout_row_dynamic(ctx, mp_s(35.0f, scale), 1);
+    if (!st->has_track) {
+        nk_label(ctx, "drop a .wav, .mp3, .flac, .ogg, .aiff, .aif or .aifc here", NK_TEXT_CENTERED);
+    } else if (ui_seek_bar(ctx, scale, th, progress, !modal_active,
+                           seek_dragging, seek_preview)) {
+        seek = (double)*seek_preview * st->duration;
+    }
+
+    /* Prev/Next work from list entries alone, so they stay live with no loaded
+     * track; Play/Pause/Stop need one. */
+    nk_layout_row_dynamic(ctx, mp_s(35.0f, scale), 5);
+    if (playlist_count(pl) == 0 || modal_active)
+        nk_widget_disable_begin(ctx);
+    if (nk_button_label(ctx, "Prev"))
+        playlist_prev(pl);
+    if (playlist_count(pl) == 0 || modal_active)
+        nk_widget_disable_end(ctx);
+
+    if (!st->has_track || modal_active)
+        nk_widget_disable_begin(ctx);
+    if (nk_button_label(ctx, "Play"))
+        playback_play();
+    if (nk_button_label(ctx, "Pause"))
+        playback_pause();
+    if (nk_button_label(ctx, "Stop"))
+        playback_stop();
+    if (!st->has_track || modal_active)
+        nk_widget_disable_end(ctx);
+
+    if (playlist_count(pl) == 0 || modal_active)
+        nk_widget_disable_begin(ctx);
+    if (nk_button_label(ctx, "Next"))
+        playlist_next(pl);
+    if (playlist_count(pl) == 0 || modal_active)
+        nk_widget_disable_end(ctx);
+
+    /* Volume label + slider; live with or without a track, disabled while a
+     * dialog is up or no audio device opened. */
+    nk_layout_row_template_begin(ctx, mp_s(30.0f, scale));
+    nk_layout_row_template_push_static(ctx, mp_s(60.0f, scale));
+    nk_layout_row_template_push_dynamic(ctx);
+    nk_layout_row_template_end(ctx);
+    slider_live = !modal_active && playback_available();
+    nk_label(ctx, volbuf, NK_TEXT_LEFT);
+    if (!slider_live)
+        nk_widget_disable_begin(ctx);
+    if (nk_slider_float(ctx, 0.0f, &volume, 1.0f, 0.01f))
+        playback_set_volume((int)lroundf(volume * 100.0f));
+    if (!slider_live)
+        nk_widget_disable_end(ctx);
+
+    return seek;
 }
 
 /* Small centred Save-as dialog. Returns 1 while it should stay open. Enter (in
@@ -676,11 +767,11 @@ main(int argc, char **argv)
         char statusbuf[768];
         char chbuf[16];
         const char *base;
-        float progress, volume;
+        float progress;
         double shown;
         int browser_open;
-        int slider_live;
         int panel_actions = PL_ACTION_NONE;
+        int dock_open;
 
         browser_open = file_browser_is_open(browser);
         modal_active = save_modal_open || browser_open;
@@ -732,7 +823,6 @@ main(int argc, char **argv)
         if (progress > 1.0f)
             progress = 1.0f;
 
-        volume = (float)st.volume_percent / 100.0f;
         snprintf(volbuf, sizeof volbuf, "vol %d%%", st.volume_percent);
 
         base = "";
@@ -784,7 +874,12 @@ main(int argc, char **argv)
                      nk_rect(0, 0, (float)px_w, (float)px_h),
                      NK_WINDOW_NO_SCROLLBAR))
         {
-            /* row 1: Open button + status; inert while a dialog is up */
+            /* Everything lays out inside the centred column; the window and
+             * the backdrop still cover the whole frame. */
+            struct nk_rect col = ui_column(nk_window_get_content_region(ctx),
+                                           ui_scale);
+
+            /* header: Open button + status; inert while a dialog is up */
             nk_layout_row_template_begin(ctx, mp_s(30.0f, ui_scale));
             nk_layout_row_template_push_static(ctx, mp_s(90.0f, ui_scale));
             nk_layout_row_template_push_dynamic(ctx);
@@ -799,64 +894,32 @@ main(int argc, char **argv)
                 nk_widget_disable_end(ctx);
             nk_label(ctx, statusbuf, NK_TEXT_LEFT);
 
-            /* row 2: time label, centered */
-            nk_layout_row_dynamic(ctx, mp_s(35.0f, ui_scale), 1);
-            nk_label(ctx, timebuf, NK_TEXT_CENTERED);
+            /* The dock holds time, seek, transport and volume; its content
+             * height is the four rows plus the three 4 pt gaps between them.
+             * The rows only draw when the group opened, and mp_dock_end must
+             * follow only when it did: a skipped begin never opened the group
+             * or pushed the group styles, so an unconditional end would pop
+             * an empty stack and close a group that was never begun. */
+            dock_open = mp_dock_begin(ctx, ui_scale, col,
+                mp_s(135.0f, ui_scale) + 3.0f * mp_s(4.0f, ui_scale),
+                &theme);
+            if (dock_open) {
+                double seek = ui_transport_panel(ctx, ui_scale, &theme, &st,
+                                                 pl, modal_active, timebuf,
+                                                 progress, volbuf,
+                                                 &seek_dragging,
+                                                 &seek_preview);
 
-            /* row 3: seek bar — click or drag to seek, released on mouse up */
-            nk_layout_row_dynamic(ctx, mp_s(35.0f, ui_scale), 1);
-            if (!st.has_track) {
-                nk_label(ctx, "drop a .wav, .mp3, .flac, .ogg, .aiff, .aif or .aifc here", NK_TEXT_CENTERED);
-            } else if (ui_seek_bar(ctx, ui_scale, &theme, progress,
-                                   !modal_active,
-                                   &seek_dragging, &seek_preview)) {
-                playback_seek((double)seek_preview * st.duration);
+                if (seek != 0.0)
+                    playback_seek(seek);
             }
 
-            /* row 4: transport. Prev/Next work from list entries alone, so
-             * they stay live with no loaded track; Play/Pause/Stop need one. */
-            nk_layout_row_dynamic(ctx, mp_s(35.0f, ui_scale), 5);
-            if (playlist_count(pl) == 0 || modal_active)
-                nk_widget_disable_begin(ctx);
-            if (nk_button_label(ctx, "Prev"))
-                playlist_prev(pl);
-            if (playlist_count(pl) == 0 || modal_active)
-                nk_widget_disable_end(ctx);
-
-            if (!st.has_track || modal_active)
-                nk_widget_disable_begin(ctx);
-            if (nk_button_label(ctx, "Play"))
-                playback_play();
-            if (nk_button_label(ctx, "Pause"))
-                playback_pause();
-            if (nk_button_label(ctx, "Stop"))
-                playback_stop();
-            if (!st.has_track || modal_active)
-                nk_widget_disable_end(ctx);
-
-            if (playlist_count(pl) == 0 || modal_active)
-                nk_widget_disable_begin(ctx);
-            if (nk_button_label(ctx, "Next"))
-                playlist_next(pl);
-            if (playlist_count(pl) == 0 || modal_active)
-                nk_widget_disable_end(ctx);
-
-            /* row 5: volume label + slider; live with or without a track,
-             * disabled while a dialog is up or no audio device opened */
-            nk_layout_row_template_begin(ctx, mp_s(30.0f, ui_scale));
-            nk_layout_row_template_push_static(ctx, mp_s(60.0f, ui_scale));
-            nk_layout_row_template_push_dynamic(ctx);
-            nk_layout_row_template_end(ctx);
-            slider_live = !modal_active && playback_available();
-            nk_label(ctx, volbuf, NK_TEXT_LEFT);
-            if (!slider_live)
-                nk_widget_disable_begin(ctx);
-            if (nk_slider_float(ctx, 0.0f, &volume, 1.0f, 0.01f))
-                playback_set_volume((int)lroundf(volume * 100.0f));
-            if (!slider_live)
-                nk_widget_disable_end(ctx);
-
-            /* row 6+: the playlist band fills whatever height is left */
+            /* The playlist band sits below the dock, in the same column, and
+             * takes whatever height is left. Only touched once the dock
+             * closed: mp_dock_end restores the shared style before it draws. */
+            if (dock_open)
+                mp_dock_end(ctx);
+            nk_layout_row_dynamic(ctx, mp_s(4.0f, ui_scale), 1);
             panel_actions = ui_playlist_panel(pl, ctx, ui_scale, modal_active);
         }
         nk_end(ctx);
