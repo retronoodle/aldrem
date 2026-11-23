@@ -119,78 +119,6 @@ ui_scale_mouse_event(SDL_Event *evt, float ratio)
     }
 }
 
-/* One row-sized seek bar. `frac` is 0..1. While dragging, writes the preview
- * fraction and keeps it live; on mouse release returns 1 (caller seeks).
- * Nuklear input is already in physical pixels, matching the layout rect. */
-static int
-ui_seek_bar(struct nk_context *ctx, float s, const struct MpTheme *th,
-    float frac, int enabled, int *dragging, float *preview)
-{
-    struct nk_command_buffer *canvas;
-    struct nk_rect b;
-    float shown, bar_h, cy, cx, handle_w;
-    int released = 0;
-
-    if (nk_widget(&b, ctx) == NK_WIDGET_INVALID)
-        return 0;
-
-    /* nk_input_mouse_clicked fires on release, so start the drag on press:
-     * that keeps the preview live and ignores releases that began elsewhere. */
-    if (enabled && nk_input_is_mouse_pressed(&ctx->input, NK_BUTTON_LEFT) &&
-        nk_input_is_mouse_hovering_rect(&ctx->input, b)) {
-        *dragging = 1;
-        *preview = (ctx->input.mouse.pos.x - b.x) / b.w;
-    } else if (*dragging) {
-        if (!enabled) {
-            *dragging = 0;
-        } else if (nk_input_is_mouse_down(&ctx->input, NK_BUTTON_LEFT)) {
-            *preview = (ctx->input.mouse.pos.x - b.x) / b.w;
-        } else {
-            *dragging = 0;
-            released = 1;
-        }
-    }
-
-    if (*preview < 0.0f)
-        *preview = 0.0f;
-    if (*preview > 1.0f)
-        *preview = 1.0f;
-
-    shown = enabled ? (*dragging ? *preview : frac) : 0.0f;
-    if (shown < 0.0f)
-        shown = 0.0f;
-    if (shown > 1.0f)
-        shown = 1.0f;
-
-    canvas = nk_window_get_canvas(ctx);
-    bar_h = mp_s(4.0f, s);
-    if (bar_h < 1.0f)
-        bar_h = 1.0f;
-    cy = b.y + b.h * 0.5f;
-
-    nk_fill_rect(canvas, nk_rect(b.x, cy - bar_h * 0.5f, b.w, bar_h),
-        0.0f, mp_theme_track(th));
-    if (shown > 0.0f)
-        nk_fill_rect(canvas, nk_rect(b.x, cy - bar_h * 0.5f, b.w * shown, bar_h),
-            0.0f, mp_theme_accent(th));
-
-    if (enabled) {
-        handle_w = mp_s(12.0f, s);
-        if (handle_w < 4.0f)
-            handle_w = 4.0f;
-        cx = b.x + b.w * shown - handle_w * 0.5f;
-        if (cx < b.x)
-            cx = b.x;
-        if (cx + handle_w > b.x + b.w)
-            cx = b.x + b.w - handle_w;
-        nk_fill_rect(canvas,
-            nk_rect(cx, cy - handle_w * 0.5f, handle_w, handle_w),
-            mp_s(2.0f, s), mp_theme_text_primary(th));
-    }
-
-    return released;
-}
-
 /* Last path component; the playlist shows basenames, not full paths. */
 static const char *
 ui_base_name(const char *path)
@@ -434,6 +362,10 @@ enum {
  * immediate-mode, so anything that must survive a frame is held here. */
 struct UiButtons {
     struct MpAnim prev, play, stop, next, open;
+    /* Seek and volume easing, alongside the buttons: same lifetime, same
+     * "survives a frame" rule. */
+    struct MpSeekAnim seek;
+    struct MpVolAnim vol;
     struct MpButtonOpts opt; /* focus slot and dt, refilled each frame */
     /* The focused slot; UI_TAB_NONE = nobody. Tab is the only focus key the
      * app consumes: Enter is left to Nuklear so edit fields and popups keep
@@ -460,8 +392,9 @@ ui_transport_panel(struct nk_context *ctx, float scale, const struct MpTheme *th
     nk_layout_row_dynamic(ctx, mp_s(35.0f, scale), 1);
     if (!st->has_track) {
         nk_label(ctx, "drop a .wav, .mp3, .flac, .ogg, .aiff, .aif or .aifc here", NK_TEXT_CENTERED);
-    } else if (ui_seek_bar(ctx, scale, th, progress, !modal_active,
-                           seek_dragging, seek_preview)) {
+    } else if (mp_seek_bar(ctx, scale, th, progress, !modal_active,
+                           seek_dragging, seek_preview, st->duration,
+                           ub->opt.dt, &ub->seek)) {
         seek = (double)*seek_preview * st->duration;
     }
 
@@ -489,19 +422,19 @@ ui_transport_panel(struct nk_context *ctx, float scale, const struct MpTheme *th
         playlist_next(pl);
 
     /* Volume label + slider; live with or without a track, disabled while a
-     * dialog is up or no audio device opened. */
+     * dialog is up or no audio device opened. The slider takes `enabled`
+     * rather than the window disable flag: nk_widget_disable_begin would set
+     * that flag for the whole dock, which would take the seek bar and the
+     * transport with it. */
     nk_layout_row_template_begin(ctx, mp_s(30.0f, scale));
     nk_layout_row_template_push_static(ctx, mp_s(60.0f, scale));
     nk_layout_row_template_push_dynamic(ctx);
     nk_layout_row_template_end(ctx);
     slider_live = !modal_active && playback_available();
     nk_label(ctx, volbuf, NK_TEXT_LEFT);
-    if (!slider_live)
-        nk_widget_disable_begin(ctx);
-    if (nk_slider_float(ctx, 0.0f, &volume, 1.0f, 0.01f))
+    if (mp_volume_slider(ctx, scale, th, &volume, slider_live, ub->opt.dt,
+                         &ub->vol))
         playback_set_volume((int)lroundf(volume * 100.0f));
-    if (!slider_live)
-        nk_widget_disable_end(ctx);
 
     return seek;
 }
@@ -708,6 +641,10 @@ main(int argc, char **argv)
 
     struct UiButtons buttons;
     memset(&buttons, 0, sizeof buttons);
+    /* The handles sit at their resting scale from the first frame; only hover
+     * and glow ease in from zero. */
+    buttons.seek.handle = 1.0f;
+    buttons.vol.handle = 1.0f;
 
     /* Phase 7 placeholder: a real per-frame dt replaces this clamped millisecond
      * delta, and the widgets' easing call sites stay the same. */
