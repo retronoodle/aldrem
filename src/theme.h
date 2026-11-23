@@ -113,6 +113,41 @@ int mp_button(struct nk_context *ctx, float scale, const struct MpTheme *th,
               int tab, int enabled, struct MpAnim *anim,
               const struct MpButtonOpts *opt);
 
+/* Seek bar and volume slider: the same glass-and-accent recipe as the buttons,
+ * with the seek row's drag contract unchanged from the old main.c bar. Both
+ * structs are caller-owned per-widget state, held across frames (never a
+ * static). */
+struct MpSeekAnim {
+    float hover;  /* 0..1 eased: 0 idle, 1 hovered */
+    float handle; /* 1..~1.15 eased: handle scale on hover/drag */
+    float glow;   /* 0..1 eased: 0 idle, 0.5 hover, 1 dragging */
+};
+
+struct MpVolAnim {
+    float hover;  /* 0..1 eased: 0 idle, 1 hovered */
+    float handle; /* 1..~1.15 eased: handle scale on hover/drag */
+};
+
+/* Lays out, draws and runs the seek bar in the current row. `frac` is 0..1.
+ * Press inside starts a drag that writes `*preview` (0..1) each frame until
+ * the button is released; the release returns 1 so the caller seeks to
+ * `*preview * duration`, and a release anywhere counts, matching the previous
+ * bar. `duration` (seconds) only feeds the hover bubble's m:ss text; pass 0
+ * to suppress it. `enabled` 0 draws the flat disabled track and cancels a
+ * drag in progress. `dt` drives the easing. */
+int mp_seek_bar(struct nk_context *ctx, float scale, const struct MpTheme *th,
+                float frac, int enabled, int *dragging, float *preview,
+                double duration, float dt, struct MpSeekAnim *anim);
+
+/* The compact volume slider: 0..1 in `*value`, clamped. A press or drag
+ * anywhere on the row sets it; returns 1 on a frame where it wrote a new
+ * value (the caller then applies it to the engine), 0 otherwise. `enabled` 0
+ * draws the muted track and fill with no handle and ignores input, so the
+ * numeric label beside it still reads true. */
+int mp_volume_slider(struct nk_context *ctx, float scale,
+                     const struct MpTheme *th, float *value, int enabled,
+                     float dt, struct MpVolAnim *anim);
+
 /* Dock panel. mp_dock_begin lays out one dock-height row spanning `col`, draws
  * the shadow, fill, border and top highlight, then opens a grouped layout for
  * the caller's rows (which must total `content_h`). Returns 1 when the caller
@@ -122,5 +157,32 @@ int mp_button(struct nk_context *ctx, float scale, const struct MpTheme *th,
 nk_bool mp_dock_begin(struct nk_context *ctx, float scale, struct nk_rect col,
     float content_h, struct MpTheme *th);
 void mp_dock_end(struct nk_context *ctx);
+
+/* Content hierarchy and states. The caller maps the engine state to this
+ * enum, so theme code never depends on the playback module. */
+enum mp_play_state { MP_PS_STOPPED, MP_PS_PLAYING, MP_PS_PAUSED };
+
+/* Header cell: filename (elided) with a state dot, and metadata chips on the
+ * right. `name` NULL draws "no file loaded". Each lays out one row cell. */
+void mp_status_row(struct nk_context *ctx, float scale, const struct MpTheme *th,
+    const char *name, const char *const *chips, int nchips,
+    enum mp_play_state ps);
+
+/* Error text in a danger panel; the full text shows as a tooltip if elided. */
+void mp_error_panel(struct nk_context *ctx, float scale, const struct MpTheme *th,
+    const char *text);
+
+/* "cur / total" with the current time primary and the total secondary. */
+void mp_time_label(struct nk_context *ctx, const struct MpTheme *th,
+    const char *cur, const char *total);
+
+/* A label in text_muted, for hints. `align` is an NK_TEXT_* flag. */
+void mp_label_muted(struct nk_context *ctx, const struct MpTheme *th,
+    const char *text, nk_flags align);
+
+/* Empty-playlist illustration: a disc, a headline and a chip row. The caller
+ * sets a one-row layout at the band height first. */
+void mp_empty_state(struct nk_context *ctx, float scale, const struct MpTheme *th,
+    const char *headline, const char *const *chips, int nchips);
 
 #endif
