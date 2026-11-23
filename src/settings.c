@@ -1,4 +1,6 @@
 /* settings.c — persisted preferences. See settings.h. */
+#define _POSIX_C_SOURCE 200809L /* fileno, fsync */
+
 #include "settings.h"
 
 #include <errno.h>
@@ -6,6 +8,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <unistd.h>
 
 #define SET_PATH_MAX 1024
 #define SET_LINE_MAX 128
@@ -99,6 +102,10 @@ settings_set_meter_style(MeterStyle style)
         return -1;
     fprintf(f, "meter_style=%s\n", style == METER_NEEDLE ? "needle" : "led");
     if (ferror(f))
+        bad = 1;
+    /* Flush to disk before the rename so a power cut cannot leave an empty
+     * or truncated file under the real name. */
+    if (fflush(f) != 0 || fsync(fileno(f)) != 0)
         bad = 1;
     if (fclose(f) != 0)
         bad = 1;

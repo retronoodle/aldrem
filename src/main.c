@@ -645,6 +645,10 @@ main(int argc, char **argv)
         SDL_Quit();
         return 1;
     }
+    /* Below about 280 pt the header's fixed cells (Open + meter reserve) cover
+     * the whole row and the meter overlay sits over the Open button. Keep the
+     * window wide enough that they never meet. */
+    SDL_SetWindowMinimumSize(win, 360, 0);
 
     /* Set the window icon from the bundled BMP so the title bar and task
      * switcher show the app icon even when it is run outside a desktop
