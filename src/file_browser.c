@@ -274,7 +274,12 @@ file_browser_open(FileBrowser *fb, const char *suggested_path)
         }
     }
 
-    if (getcwd(cwd, sizeof cwd) && fb_begin_scan(fb, cwd) == 0)
+    const char *home = getenv("HOME");
+    int cwd_usable = getcwd(cwd, sizeof cwd) != NULL && strcmp(cwd, "/") != 0;
+
+    if (cwd_usable && fb_begin_scan(fb, cwd) == 0)
+        return;
+    if (home && home[0] && fb_begin_scan(fb, home) == 0)
         return;
 
     fb_begin_scan(fb, "/");

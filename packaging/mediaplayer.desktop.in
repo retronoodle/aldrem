@@ -1,0 +1,13 @@
+[Desktop Entry]
+Type=Application
+Name=mediaplayer
+GenericName=Audio Player
+Comment=Minimal WAV/MP3 player
+Exec=@BINDIR@/mediaplayer %f
+Icon=mediaplayer
+Terminal=false
+Categories=AudioVideo;Audio;Player;
+MimeType=audio/mpeg;audio/wav;audio/x-wav;
+StartupNotify=true
+StartupWMClass=mediaplayer
+Keywords=audio;music;player;mp3;wav;

@@ -16,3 +16,19 @@ Source repo: https://github.com/lieff/minimp3 — commit **48e3a085f0e1a99446b34
 - `minimp3.h` — https://raw.githubusercontent.com/lieff/minimp3/48e3a085f0e1a99446b34614e1e7f17f09dc2e82/minimp3.h
 
 No modifications. Only the core header is vendored (`minimp3_ex.h` is not). Public domain (CC0).
+
+## dr_flac
+
+Source repo: https://github.com/mackron/dr_libs — `master`, header self-reports **v0.13.5** — fetched 2026-11-23.
+
+- `dr_flac.h` — https://raw.githubusercontent.com/mackron/dr_libs/master/dr_flac.h
+
+No modifications. Choice of public domain or MIT-0; license statement at the end of the file. Not wired into the build yet — see `docs/PRD-format-support.md` (Phase A).
+
+## stb_vorbis
+
+Source repo: https://github.com/nothings/stb — `master`, header self-reports **v1.25** — fetched 2026-11-23.
+
+- `stb_vorbis.c` — https://raw.githubusercontent.com/nothings/stb/master/stb_vorbis.c
+
+No modifications. Public domain; license statement at the end of the file. Not wired into the build yet — see `docs/PRD-format-support.md` (Phase B).
