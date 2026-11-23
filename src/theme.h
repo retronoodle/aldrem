@@ -50,12 +50,22 @@ struct MpTheme {
      * and read by mp_theme_backdrop to place the glow. Zero before the first
      * frame draws the dock. */
     struct nk_rect dock_rect;
+
+    /* MEDIAPLAYER_REDUCE_MOTION set at init: easing snaps to its end state and
+     * the pulse and float hold still. Read once, never per frame. */
+    int reduce_motion;
+
+    /* Seconds of animation time, advanced once a frame by mp_theme_tick. The
+     * pulse and float are phases of this clock. */
+    float clock;
 };
 
 /* Creates the ambient glow (needs a live renderer); mp_theme_shutdown must run
  * before SDL_DestroyRenderer. */
 void mp_theme_init(struct MpTheme *th, SDL_Renderer *ren);
 void mp_theme_apply(struct nk_context *ctx, float scale, struct MpTheme *th);
+/* Advances the animation clock by one frame's dt (seconds). */
+void mp_theme_tick(struct MpTheme *th, float dt);
 
 /* Paints the window backdrop: a vertical banded gradient plus the ambient glow
  * behind the dock rect. Called once per frame before nk_sdl_render. */
