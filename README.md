@@ -146,7 +146,7 @@ Licenses for the vendored libraries live alongside them in [`vendor/`](vendor/);
 - **FLAC:** stereo or mono. Multichannel FLAC is not supported, and neither is Ogg-encapsulated FLAC.
 - **Channels:** mono and stereo only — there is no surround or multichannel mixing. Everything is converted to 44.1 kHz stereo float32 for the device.
 - **Playlists:** no reordering, repeat or shuffle yet.
-- **Radio:** no now-playing metadata, no `.pls`/`.m3u` station URLs and no HLS (`.m3u8`) streams. Ogg Opus is not decoded. Opening a station waits on the network, so a dead station can freeze the window for up to about 8 seconds.
+- **Radio:** now-playing comes from the in-stream ICY `StreamTitle` only, so MP3 and AAC stations that send it show `Station: Artist - Title`. Ogg stations show just the station name. No `.pls`/`.m3u` station URLs and no HLS (`.m3u8`) streams. Ogg Opus is not decoded. Opening a station waits on the network, so a dead station can freeze the window for up to about 8 seconds.
 - **Tags:** file and track names come from the path; embedded metadata is not read.
 
 ## Contributing

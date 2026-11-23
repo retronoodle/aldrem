@@ -37,7 +37,7 @@ SRC := src/main.c src/playback.c src/track.c src/track_wav.c src/track_mp3.c \
        src/track_flac.c src/track_ogg.c src/track_aiff.c src/file_browser.c \
        src/playlist.c src/theme.c src/vu.c src/settings.c src/finder.c \
        src/net.c src/radio.c src/radio_search.c src/track_stream.c \
-       src/track_stream_aac.c vendor/stb_vorbis.c
+       src/track_stream_aac.c src/tags.c vendor/stb_vorbis.c
 OBJ := $(patsubst %.c,build/obj/%.o,$(SRC))
 
 # Runtime window icon: rendered from packaging/aldrem.svg and baked into the
@@ -59,9 +59,21 @@ OBJCOPY_ARCH   := i386:x86-64
 endif
 endif
 
+# Launchers (GNOME Shell etc.) hand the app a startup-notification ID that
+# SDL2's X11 backend never acknowledges, so the busy cursor and missing dock
+# icon last until the launcher times out. Xlib lets main.c send the "startup
+# complete" message. Auto-detected; `make X11=0` skips it.
+ifneq ($(UNAME_S),Darwin)
+X11 ?= $(shell pkg-config --exists x11 2>/dev/null && echo 1 || echo 0)
+ifeq ($(X11),1)
+CFLAGS += -DHAVE_X11 $(shell pkg-config --cflags x11)
+LDLIBS += $(shell pkg-config --libs x11)
+endif
+endif
+
 HDR := src/playback.h src/track.h src/track_internal.h src/track_stream_internal.h \
        src/file_browser.h src/playlist.h src/theme.h src/vu.h src/settings.h \
-       src/finder.h src/net.h src/radio.h src/radio_search.h vendor/jsmn.h \
+       src/finder.h src/net.h src/tags.h src/radio.h src/radio_search.h vendor/jsmn.h \
        src/nuklear_config.h vendor/nuklear.h \
        vendor/nuklear_sdl_renderer.h vendor/minimp3.h vendor/dr_flac.h \
        vendor/stb_vorbis.c
@@ -77,7 +89,7 @@ APP      := build/$(TARGET).app
 # pull in net.c, so it is part of the set.
 TEST_SRC := src/playback.c src/track.c src/track_wav.c src/track_mp3.c \
             src/track_flac.c src/track_ogg.c src/track_aiff.c \
-            src/track_stream.c src/track_stream_aac.c src/net.c
+            src/track_stream.c src/track_stream_aac.c src/net.c src/tags.c
 TEST_OBJ := $(patsubst src/%.c,build/obj/src/%.o,$(TEST_SRC)) \
             build/obj/vendor/stb_vorbis.o
 
@@ -174,6 +186,10 @@ tests/test_radio: tests/test_radio.c src/radio.c src/radio.h vendor/jsmn.h
 
 # Playlist station entries: names kept in step with paths, #EXTINF and URL
 # lines. Runs the real playlist.c against an isolated XDG config dir.
+# Embedded title/artist readers, against synthetic tagged fixtures.
+tests/test_tags: tests/test_tags.c src/tags.c src/tags.h
+	$(CC) $(CFLAGS) -Isrc -o $@ tests/test_tags.c src/tags.c $(LDLIBS)
+
 tests/test_playlist: tests/test_playlist.c build/obj/src/playlist.o $(TEST_OBJ)
 	$(CC) $(CFLAGS) -Isrc -o $@ tests/test_playlist.c build/obj/src/playlist.o $(TEST_OBJ) $(LDLIBS)
 
@@ -194,10 +210,11 @@ endif
 # build never needs python3. `make test FIXTURE=path/to.wav` runs it.
 # The decoder round-trip opens a device, so pin the dummy driver: CI runners
 # and headless boxes have no sound card, and decoding does not need one.
-test: $(TARGET) tests/test_load tests/test_vu tests/test_settings tests/test_finder tests/test_radio tests/test_stream tests/test_playlist $(TEST_NET_BIN)
+test: $(TARGET) tests/test_load tests/test_vu tests/test_settings tests/test_finder tests/test_radio tests/test_stream tests/test_playlist tests/test_tags $(TEST_NET_BIN)
 	./tests/test_vu
 	./tests/test_radio
 	./tests/test_stream tests/data
+	./tests/test_tags
 	rm -rf build/test-playlist && ./tests/test_playlist build/test-playlist tests/data/tone.mp3
 	$(if $(TEST_NET_BIN),./tests/test_net)
 	rm -rf build/test-finder && mkdir -p build/test-finder && ./tests/test_finder build/test-finder
@@ -210,6 +227,6 @@ test: $(TARGET) tests/test_load tests/test_vu tests/test_settings tests/test_fin
 	sh tests/smoke.sh ./$(TARGET)
 
 clean:
-	rm -rf build/obj tests/test_load tests/test_vu tests/test_settings tests/test_finder tests/test_radio tests/test_stream tests/test_playlist tests/test_net $(TARGET)
+	rm -rf build/obj tests/test_load tests/test_vu tests/test_settings tests/test_finder tests/test_radio tests/test_stream tests/test_playlist tests/test_tags tests/test_net $(TARGET)
 
 .PHONY: run clean build build-obj install uninstall app test $(DESKTOP)

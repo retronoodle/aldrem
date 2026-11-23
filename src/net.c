@@ -23,8 +23,21 @@
 #define NET_STALL_S      15     /* a stream slower than 1 B/s this long fails */
 #define NET_FETCH_MAX_S  10
 #define NET_CTYPE_MAX    64
+#define NET_TITLE_MAX    256    /* 255 bytes of title plus NUL */
+#define NET_ICY_META_MAX (255 * 16) /* largest metadata block the length byte allows */
+#define NET_ICY_METAINT_MAX (256 * 1024)
+#define NET_TITLE_Q      16     /* titles waiting for their audio to be read */
 
 #ifdef HAVE_CURL
+
+/* In-stream ICY states. A stream with icy-metaint is audio runs of metaint
+ * bytes, each followed by one length byte and that many metadata bytes. */
+enum { ICY_AUDIO, ICY_LENGTH, ICY_META };
+
+struct IcyPending {
+    unsigned long long pos; /* out_total at which this title takes over */
+    char title[NET_TITLE_MAX];
+};
 
 struct NetStream {
     CURL *easy;
@@ -45,6 +58,27 @@ struct NetStream {
     int joined;
 
     char ctype[NET_CTYPE_MAX];
+
+    /* ICY metadata, touched only by the transfer thread under mu. icy_metaint
+     * is 0 when the server sent none, and then bytes pass through untouched. */
+    long icy_metaint;
+    long icy_audio_left;  /* audio bytes before the next metadata length */
+    long icy_meta_left;   /* metadata bytes still to come in this block */
+    int icy_state;
+    size_t icy_meta_len;  /* metadata bytes kept in icy_meta */
+    char icy_meta[NET_ICY_META_MAX];
+    char title[NET_TITLE_MAX]; /* title now being heard, "" when none */
+
+    /* A title is shown when the audio it came with is read out, not when it
+     * arrives. The net ring can hold tens of seconds of audio, so titles wait
+     * here, keyed on byte position. in_total counts audio bytes put in the
+     * ring, out_total those read out. Both are guarded by mu. */
+    unsigned long long in_total;
+    unsigned long long out_total;
+    struct IcyPending pend[NET_TITLE_Q];
+    int pend_head;
+    int pend_count;
+    char last_queued[NET_TITLE_MAX]; /* newest queued title, to skip repeats */
 };
 
 static int curl_inited;
@@ -125,14 +159,42 @@ header_cb(char *buffer, size_t size, size_t nitems, void *userdata)
         long code = 0;
 
         curl_easy_getinfo(ns->easy, CURLINFO_RESPONSE_CODE, &code);
-        if (code < 200 || code >= 300)
+        if (code < 200 || code >= 300) {
+            ns->icy_metaint = 0; /* a redirect's metaint must not leak in */
             return n;
+        }
+        /* Ogg carries its own metadata, so an ICY offer there is ignored. */
+        if (strcmp(ns->ctype, "application/ogg") == 0
+            || strcmp(ns->ctype, "audio/ogg") == 0)
+            ns->icy_metaint = 0;
+        ns->icy_state = ICY_AUDIO;
+        ns->icy_audio_left = ns->icy_metaint;
         SDL_LockMutex(ns->mu);
         ns->headers_done = 1;
         ns->ready = 1;
         SDL_CondBroadcast(ns->cv);
         SDL_UnlockMutex(ns->mu);
         return n;
+    }
+
+    {
+        static const char metaint_key[] = "icy-metaint:";
+        size_t mk = sizeof metaint_key - 1;
+
+        if (n > mk && SDL_strncasecmp(buffer, metaint_key, mk) == 0) {
+            long v = 0;
+
+            for (i = mk; i < n && (buffer[i] == ' ' || buffer[i] == '\t'); i++)
+                ;
+            for (; i < n && buffer[i] >= '0' && buffer[i] <= '9'; i++) {
+                v = v * 10 + (buffer[i] - '0');
+                if (v > NET_ICY_METAINT_MAX)
+                    break;
+            }
+            if (v > 0 && v <= NET_ICY_METAINT_MAX)
+                ns->icy_metaint = v;
+            return n;
+        }
     }
 
     if (n < sizeof key - 1 || SDL_strncasecmp(buffer, key, sizeof key - 1) != 0)
@@ -155,6 +217,109 @@ header_cb(char *buffer, size_t size, size_t nitems, void *userdata)
     return n;
 }
 
+/* Appends len audio bytes to the ring, waiting for room. Called with mu held.
+ * Returns 0 when aborted before everything was stored. */
+static int
+ring_put(NetStream *ns, const char *src, size_t len)
+{
+    size_t off = 0;
+
+    while (off < len) {
+        size_t space, tail, chunk, wi;
+
+        while (ns->count == NET_RING_BYTES && !ns->aborted)
+            SDL_CondWait(ns->cv, ns->mu);
+        if (ns->aborted)
+            return 0;
+
+        space = NET_RING_BYTES - ns->count;
+        wi = (ns->head + ns->count) % NET_RING_BYTES;
+        tail = NET_RING_BYTES - wi;
+        chunk = len - off;
+        if (chunk > space)
+            chunk = space;
+        if (chunk > tail)
+            chunk = tail;
+
+        memcpy(ns->ring + wi, src + off, chunk);
+        ns->count += chunk;
+        ns->in_total += chunk;
+        off += chunk;
+        ns->ready = 1;
+        SDL_CondBroadcast(ns->cv);
+    }
+    return 1;
+}
+
+/* Makes the oldest queued title the one being heard. Called with mu held. */
+static void
+icy_pop(NetStream *ns)
+{
+    snprintf(ns->title, sizeof ns->title, "%s", ns->pend[ns->pend_head].title);
+    ns->pend_head = (ns->pend_head + 1) % NET_TITLE_Q;
+    ns->pend_count--;
+}
+
+/* Takes over every queued title whose preceding audio has been read out.
+ * Called with mu held. */
+static void
+icy_release(NetStream *ns)
+{
+    while (ns->pend_count > 0 && ns->pend[ns->pend_head].pos <= ns->out_total)
+        icy_pop(ns);
+}
+
+/* Reads StreamTitle='...'; out of one metadata block and queues it for when
+ * its audio is heard. A block without a StreamTitle keeps the last title,
+ * since servers send empty blocks between songs. Called with mu held. */
+static void
+icy_store_title(NetStream *ns, const char *buf, size_t n)
+{
+    static const char key[] = "StreamTitle='";
+    size_t k = sizeof key - 1, i, start, end, j, o = 0;
+    char title[NET_TITLE_MAX];
+
+    for (i = 0; i + k <= n; i++) {
+        if (memcmp(buf + i, key, k) == 0)
+            break;
+    }
+    if (i + k > n)
+        return;
+
+    start = i + k;
+    end = start;
+    while (end < n && buf[end] != '\0'
+           && !(buf[end] == '\'' && end + 1 < n && buf[end + 1] == ';'))
+        end++;
+
+    for (j = start; j < end && o < NET_TITLE_MAX - 1; j++)
+        title[o++] = buf[j];
+    title[o] = '\0';
+
+    /* Trim the padding servers put around the text. */
+    while (o > 0 && title[o - 1] == ' ')
+        title[--o] = '\0';
+    j = 0;
+    while (title[j] == ' ')
+        j++;
+    if (strcmp(ns->last_queued, title + j) == 0)
+        return; /* servers repeat the title; nothing changed */
+    if (ns->pend_count == NET_TITLE_Q) {
+        /* The reader is far behind. Show the oldest title now rather than
+         * drop it. */
+        icy_pop(ns);
+    }
+    {
+        int slot = (ns->pend_head + ns->pend_count) % NET_TITLE_Q;
+
+        ns->pend[slot].pos = ns->in_total;
+        snprintf(ns->pend[slot].title, sizeof ns->pend[slot].title, "%s",
+                 title + j);
+        ns->pend_count++;
+    }
+    snprintf(ns->last_queued, sizeof ns->last_queued, "%s", title + j);
+}
+
 static size_t
 write_cb(char *ptr, size_t size, size_t nmemb, void *userdata)
 {
@@ -163,32 +328,69 @@ write_cb(char *ptr, size_t size, size_t nmemb, void *userdata)
 
     SDL_LockMutex(ns->mu);
     while (off < total) {
-        size_t space, tail, chunk, wi;
+        size_t n;
 
-        while (ns->count == NET_RING_BYTES && !ns->aborted)
-            SDL_CondWait(ns->cv, ns->mu);
-        if (ns->aborted) {
-            SDL_UnlockMutex(ns->mu);
-            return 0; /* curl reports a write error and stops */
+        if (ns->icy_metaint <= 0) {
+            n = total - off;
+            if (!ring_put(ns, ptr + off, n))
+                goto aborted;
+            off += n;
+            continue;
         }
 
-        space = NET_RING_BYTES - ns->count;
-        wi = (ns->head + ns->count) % NET_RING_BYTES;
-        tail = NET_RING_BYTES - wi;
-        chunk = total - off;
-        if (chunk > space)
-            chunk = space;
-        if (chunk > tail)
-            chunk = tail;
+        switch (ns->icy_state) {
+        case ICY_AUDIO:
+            n = total - off;
+            if ((long)n > ns->icy_audio_left)
+                n = (size_t)ns->icy_audio_left;
+            if (!ring_put(ns, ptr + off, n))
+                goto aborted;
+            off += n;
+            ns->icy_audio_left -= (long)n;
+            if (ns->icy_audio_left == 0)
+                ns->icy_state = ICY_LENGTH;
+            break;
+        case ICY_LENGTH:
+            /* The length byte is in 16-byte units. */
+            ns->icy_meta_left = (long)(unsigned char)ptr[off] * 16;
+            off++;
+            ns->icy_meta_len = 0;
+            if (ns->icy_meta_left > 0) {
+                ns->icy_state = ICY_META;
+            } else {
+                ns->icy_state = ICY_AUDIO;
+                ns->icy_audio_left = ns->icy_metaint;
+            }
+            break;
+        case ICY_META:
+            n = total - off;
+            if ((long)n > ns->icy_meta_left)
+                n = (size_t)ns->icy_meta_left;
+            {
+                /* Keep what fits; the rest of the block is consumed unstored. */
+                size_t keep = n;
 
-        memcpy(ns->ring + wi, ptr + off, chunk);
-        ns->count += chunk;
-        off += chunk;
-        ns->ready = 1;
-        SDL_CondBroadcast(ns->cv);
+                if (keep > sizeof ns->icy_meta - ns->icy_meta_len)
+                    keep = sizeof ns->icy_meta - ns->icy_meta_len;
+                memcpy(ns->icy_meta + ns->icy_meta_len, ptr + off, keep);
+                ns->icy_meta_len += keep;
+            }
+            off += n;
+            ns->icy_meta_left -= (long)n;
+            if (ns->icy_meta_left == 0) {
+                icy_store_title(ns, ns->icy_meta, ns->icy_meta_len);
+                ns->icy_state = ICY_AUDIO;
+                ns->icy_audio_left = ns->icy_metaint;
+            }
+            break;
+        }
     }
     SDL_UnlockMutex(ns->mu);
     return total;
+
+aborted:
+    SDL_UnlockMutex(ns->mu);
+    return 0; /* curl reports a write error and stops */
 }
 
 static int
@@ -267,8 +469,9 @@ net_open(const char *url, char *err, size_t errlen)
     curl_easy_setopt(ns->easy, CURLOPT_NOPROGRESS, 0L);
     curl_easy_setopt(ns->easy, CURLOPT_XFERINFOFUNCTION, xferinfo_cb);
     curl_easy_setopt(ns->easy, CURLOPT_XFERINFODATA, ns);
-    /* Ask for no in-stream metadata: this player does not parse ICY blocks. */
-    ns->hdrs = curl_slist_append(NULL, "Icy-MetaData: 0");
+    /* Ask for in-stream metadata: write_cb strips it out of the audio and
+     * keeps the StreamTitle for net_stream_title. */
+    ns->hdrs = curl_slist_append(NULL, "Icy-MetaData: 1");
     curl_easy_setopt(ns->easy, CURLOPT_HTTPHEADER, ns->hdrs);
 
     ns->thread = SDL_CreateThread(transfer_thread, "net", ns);
@@ -447,6 +650,7 @@ net_read(NetStream *ns, unsigned char *buf, int cap)
     memcpy(buf + first, ns->ring, n - first);
     ns->head = (ns->head + n) % NET_RING_BYTES;
     ns->count -= n;
+    ns->out_total += n;
     SDL_CondBroadcast(ns->cv); /* the writer may be waiting for room */
     SDL_UnlockMutex(ns->mu);
     return (int)n;
@@ -456,6 +660,24 @@ const char *
 net_content_type(const NetStream *ns)
 {
     return ns ? ns->ctype : "";
+}
+
+int
+net_stream_title(NetStream *ns, char *out, size_t cap)
+{
+    int has = 0;
+
+    if (!ns || !out || cap == 0)
+        return 0;
+    out[0] = '\0';
+    SDL_LockMutex(ns->mu);
+    icy_release(ns);
+    if (ns->title[0]) {
+        snprintf(out, cap, "%s", ns->title);
+        has = 1;
+    }
+    SDL_UnlockMutex(ns->mu);
+    return has;
 }
 
 void
@@ -517,6 +739,15 @@ net_content_type(const NetStream *ns)
     return "";
 }
 
+int
+net_stream_title(NetStream *ns, char *out, size_t cap)
+{
+    (void)ns;
+    if (out && cap)
+        out[0] = '\0';
+    return 0;
+}
+
 void
 net_abort(NetStream *ns)
 {
@@ -537,6 +768,15 @@ net_fetch(const char *url, char *out, size_t outcap, size_t *out_len,
     if (err && errlen)
         snprintf(err, errlen, "this build has no network support");
     return -1;
+}
+
+int
+net_fetch_cancellable(const char *url, char *out, size_t outcap,
+                      size_t *out_len, char *err, size_t errlen,
+                      NetCancelFn cancelled, void *ctx)
+{
+    (void)cancelled; (void)ctx;
+    return net_fetch(url, out, outcap, out_len, err, errlen);
 }
 
 #endif

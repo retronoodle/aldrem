@@ -27,6 +27,11 @@ int net_read(NetStream *ns, unsigned char *buf, int cap);
  * Valid until net_close. */
 const char *net_content_type(const NetStream *ns);
 
+/* Copies the latest in-stream StreamTitle ("Artist - Title") into out. Returns
+ * 1 when a title is known, 0 when none has arrived (or the server sends no
+ * ICY metadata). Safe from any thread while the stream is open. */
+int net_stream_title(NetStream *ns, char *out, size_t cap);
+
 /* Wakes a blocked net_read and makes the transfer stop. Safe from any thread,
  * including while net_read runs on another thread. */
 void net_abort(NetStream *ns);

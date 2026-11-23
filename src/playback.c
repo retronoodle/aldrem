@@ -15,6 +15,7 @@
  * gap but never touches the callback path.
  */
 #include "playback.h"
+#include "tags.h"
 #include "track.h"
 
 #include <math.h>
@@ -36,6 +37,7 @@ struct Playback {
     SDL_mutex *meta_mutex;
     char name[512];
     char error[512];
+    char tag_text[256]; /* local file: "Artist - Title" from its tags */
     double duration;
     int has_track;
     int volume_percent;
@@ -490,6 +492,7 @@ playback_load(const char *path, char *err, size_t errlen)
     TrackInfo info;
     Track *t;
     char errbuf[256] = "";
+    char tag_line[256] = "";
 
     if (err && errlen)
         err[0] = '\0';
@@ -520,10 +523,26 @@ playback_load(const char *path, char *err, size_t errlen)
         g.track = NULL;
     }
 
+    /* Local files show their embedded tags in place of the filename. Read
+     * before taking the lock so status reads on the UI thread never wait on
+     * disk. */
+    if (!info.is_live) {
+        char artist[120], title[120];
+
+        if (tags_read(path, artist, sizeof artist, title, sizeof title)) {
+            if (artist[0] && title[0])
+                snprintf(tag_line, sizeof tag_line, "%s - %s", artist, title);
+            else
+                snprintf(tag_line, sizeof tag_line, "%s",
+                         title[0] ? title : artist);
+        }
+    }
+
     g.track = t;
     g.info = info;
 
     SDL_LockMutex(g.meta_mutex);
+    snprintf(g.tag_text, sizeof g.tag_text, "%s", tag_line);
     g.has_track = 1;
     g.duration = info.src_spec.freq > 0
         ? (double)info.total_frames / (double)info.src_spec.freq
@@ -717,6 +736,8 @@ playback_get_status(PlaybackStatus *out)
     out->bits_per_sample = g.info.bits_per_sample;
     out->is_live = g.info.is_live;
     out->live_paused = g.live_paused;
+    if (g.track && g.info.is_live)
+        track_title(g.track, out->now_playing, sizeof out->now_playing);
     out->sample_rate = g.info.src_spec.freq;
     out->channels = g.info.src_spec.channels;
     if (g.info.codec)
@@ -725,6 +746,8 @@ playback_get_status(PlaybackStatus *out)
     SDL_LockMutex(g.meta_mutex);
     out->has_track = g.has_track;
     out->duration = g.duration;
+    if (!g.info.is_live)
+        snprintf(out->now_playing, sizeof out->now_playing, "%s", g.tag_text);
     snprintf(out->name, sizeof out->name, "%s", g.name);
     snprintf(out->error, sizeof out->error, "%s", g.error);
     SDL_UnlockMutex(g.meta_mutex);

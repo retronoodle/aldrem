@@ -41,7 +41,7 @@ The network surface is deliberately small:
 
 ## Out of scope
 
-- ICY/stream metadata (now-playing text). Requests send `Icy-MetaData: 0`.
+- Now-playing text from Ogg streams (Vorbis comments). MP3 and AAC stations that send ICY `StreamTitle` do show it, as `Station: Artist - Title`.
 - `.pls` and `.m3u` station URLs (Radio Browser already returns a direct stream URL).
 - HLS (`.m3u8`) streams, Ogg Opus, and multichannel streams.
 - Recording, favourites, sorting or filtering the results.

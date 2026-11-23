@@ -8,6 +8,6 @@ Icon=aldrem
 Terminal=false
 Categories=AudioVideo;Audio;Player;
 MimeType=audio/mpeg;audio/wav;audio/x-wav;audio/flac;audio/ogg;audio/x-vorbis+ogg;audio/aiff;audio/x-aiff;audio/x-aifc;
-StartupNotify=true
+StartupNotify=false
 StartupWMClass=aldrem
 Keywords=aldrem;audio;music;player;mp3;wav;flac;ogg;vorbis;aiff;aif;

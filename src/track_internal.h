@@ -13,6 +13,7 @@ typedef struct TrackOps {
     int  (*seek)(Track *, Uint32);
     void (*close)(Track *);
     void (*interrupt)(Track *); /* optional; NULL for local files */
+    int  (*title)(Track *, char *, size_t); /* optional; NULL unless live */
 } TrackOps;
 
 typedef struct {

@@ -72,12 +72,14 @@ static int stream_decode_chunk(Track *t, Uint8 *dst, int cap);
 static int stream_seek(Track *t, Uint32 frame);
 static void stream_interrupt(Track *t);
 static void stream_close(Track *t);
+static int stream_title(Track *t, char *out, size_t cap);
 
 static const TrackOps stream_ops = {
     .decode_chunk = stream_decode_chunk,
     .seek = stream_seek,
     .close = stream_close,
     .interrupt = stream_interrupt,
+    .title = stream_title,
 };
 
 static int
@@ -615,6 +617,14 @@ stream_interrupt(Track *t)
         t->io.abort(t->io.ud);
 }
 
+static int
+stream_title(Track *t, char *out, size_t cap)
+{
+    if (!t || !t->io.title)
+        return 0;
+    return t->io.title(t->io.ud, out, cap);
+}
+
 static void
 stream_close(Track *t)
 {
@@ -698,6 +708,19 @@ netio_abort(void *ud)
     SDL_UnlockMutex(n->mu);
 }
 
+static int
+netio_title(void *ud, char *out, size_t cap)
+{
+    NetIO *n = (NetIO *)ud;
+    int has = 0;
+
+    SDL_LockMutex(n->mu);
+    if (n->ns)
+        has = net_stream_title(n->ns, out, cap);
+    SDL_UnlockMutex(n->mu);
+    return has;
+}
+
 static void
 netio_reset(void *ud)
 {
@@ -766,6 +789,7 @@ track_stream_open(const char *url, TrackInfo *info, char *err, size_t errlen)
     io.abort = netio_abort;
     io.reset = netio_reset;
     io.destroy = netio_destroy;
+    io.title = netio_title;
     io.ud = n;
     return track_stream_open_io(&io, net_content_type(ns), info, err, errlen);
 }

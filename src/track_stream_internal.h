@@ -21,6 +21,9 @@ typedef struct {
     void (*reset)(void *ud);
     /* Releases ud. Called exactly once, on failure or close. */
     void (*destroy)(void *ud);
+    /* Optional: copies the current now-playing text into out. Returns 1 when
+     * known, 0 when not. NULL for in-memory IO. Any thread. */
+    int (*title)(void *ud, char *out, size_t cap);
     void *ud;
 } StreamIO;
 

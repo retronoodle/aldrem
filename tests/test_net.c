@@ -46,6 +46,69 @@ send_all(int fd, const char *s, size_t n)
     }
 }
 
+#define ICY_METAINT 1000
+
+/* Sends n audio bytes continuing the pattern from *ai. */
+static void
+send_audio(int fd, size_t *ai, size_t n)
+{
+    unsigned char *b = malloc(n);
+    size_t i;
+
+    for (i = 0; i < n; i++)
+        b[i] = pattern(*ai + i);
+    send_all(fd, (const char *)b, n);
+    *ai += n;
+    free(b);
+}
+
+/* Sends one ICY metadata block holding text, padded with NULs to a 16-byte
+ * multiple. An empty text sends the zero length byte alone. The first block
+ * is sent in pieces, so the parser must cope with a block split over reads. */
+static void
+send_icy_block(int fd, const char *text, int fragment)
+{
+    unsigned char meta[255 * 16];
+    size_t mlen = text ? strlen(text) : 0;
+    size_t padded = (mlen + 15) / 16 * 16;
+    unsigned char lb = (unsigned char)(padded / 16);
+
+    memset(meta, 0, sizeof meta);
+    if (mlen)
+        memcpy(meta, text, mlen);
+    send_all(fd, (const char *)&lb, 1);
+    if (!padded)
+        return;
+    if (fragment) {
+        SDL_Delay(20);
+        send_all(fd, (const char *)meta, padded / 2);
+        SDL_Delay(20);
+        send_all(fd, (const char *)meta + padded / 2, padded - padded / 2);
+    } else {
+        send_all(fd, (const char *)meta, padded);
+    }
+}
+
+/* Audio with ICY metadata: 1000 audio bytes, then a title, 1000 bytes, an
+ * empty block, 1000 bytes, a second title, 1000 bytes. */
+static void
+serve_icy(int fd)
+{
+    static const char hdr[] =
+        "HTTP/1.1 200 OK\r\nContent-Type: audio/mpeg\r\n"
+        "icy-metaint: 1000\r\nConnection: close\r\n\r\n";
+    size_t ai = 0;
+
+    send_all(fd, hdr, strlen(hdr));
+    send_audio(fd, &ai, ICY_METAINT);
+    send_icy_block(fd, "StreamTitle='Pat's Band - Tune';StreamUrl='';", 1);
+    send_audio(fd, &ai, ICY_METAINT);
+    send_icy_block(fd, NULL, 0);
+    send_audio(fd, &ai, ICY_METAINT);
+    send_icy_block(fd, "StreamTitle='Next One';", 0);
+    send_audio(fd, &ai, ICY_METAINT);
+}
+
 static void
 handle(int fd, const char *path)
 {
@@ -63,6 +126,8 @@ handle(int fd, const char *path)
             body[i] = pattern(i);
         send_all(fd, (const char *)body, BODY_BYTES);
         free(body);
+    } else if (strcmp(path, "/icy") == 0) {
+        serve_icy(fd);
     } else if (strcmp(path, "/redir") == 0) {
         /* Must not be followed: file:// is outside the allowed schemes. */
         const char *r = "HTTP/1.1 302 Found\r\nLocation: file:///etc/hostname\r\n"
@@ -186,6 +251,48 @@ test_stream_ok(void)
 }
 
 static void
+test_icy(void)
+{
+    char url[128], err[160], title[256];
+    NetStream *ns;
+    unsigned char buf[700];
+    size_t got = 0, bad = 0, early = 0;
+    int n;
+
+    snprintf(url, sizeof url, "%s/icy", srv_base);
+    ns = net_open(url, err, sizeof err);
+    CHECK(ns != NULL, "icy: opens");
+    if (!ns) {
+        fprintf(stderr, "  %s\n", err);
+        return;
+    }
+    CHECK(net_stream_title(ns, title, sizeof title) == 0,
+          "icy: no title before any block has been read");
+    while ((n = net_read(ns, buf, sizeof buf)) > 0) {
+        int i;
+
+        for (i = 0; i < n; i++) {
+            if (buf[i] != pattern(got + (size_t)i))
+                bad++;
+        }
+        got += (size_t)n;
+        /* The first title belongs to the audio after byte ICY_METAINT, so
+         * none may show while the reader is still before it. */
+        if (got < ICY_METAINT && net_stream_title(ns, title, sizeof title) == 1)
+            early++;
+    }
+    CHECK(early == 0, "icy: title not shown before its audio is read");
+    CHECK(n == 0, "icy: clean end of stream");
+    CHECK(got == 4 * ICY_METAINT, "icy: only audio bytes delivered");
+    CHECK(bad == 0, "icy: metadata stripped, audio bytes intact in order");
+    CHECK(net_stream_title(ns, title, sizeof title) == 1,
+          "icy: title known after the blocks");
+    CHECK(strcmp(title, "Next One") == 0,
+          "icy: latest title kept, empty block left it alone");
+    net_close(ns);
+}
+
+static void
 test_refusals(void)
 {
     char url[128], err[160];
@@ -273,6 +380,7 @@ main(void)
     }
 
     test_stream_ok();
+    test_icy();
     test_refusals();
     test_abort();
     test_fetch();

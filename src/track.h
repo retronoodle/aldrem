@@ -38,6 +38,10 @@ int track_seek(Track *t, Uint32 frame);
  * thread. No-op for local files. */
 void track_interrupt(Track *t);
 
+/* Copies the current now-playing text of a live stream into out. Returns 1
+ * when known, 0 when not (always 0 for local files). Safe from any thread. */
+int track_title(Track *t, char *out, size_t cap);
+
 void track_close(Track *t);
 
 #endif

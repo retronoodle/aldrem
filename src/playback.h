@@ -25,6 +25,7 @@ typedef struct {
     int    is_live;        /* 1 for a network stream: duration 0, no seeking */
     int    finished;       /* 1 on the single status read that consumes EOF */
     int    live_paused;    /* 1 while a paused live stream sits stopped (Play reconnects) */
+    char   now_playing[256]; /* live: StreamTitle; local: "Artist - Title" tags; empty when unknown */
 } PlaybackStatus;
 
 int  playback_init(void); /* SDL_OpenAudioDevice, ring alloc */

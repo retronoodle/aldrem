@@ -1502,8 +1502,9 @@ mp_chips_right(struct nk_command_buffer *canvas, const struct nk_user_font *font
     return right;
 }
 
-/* Filename, dot, and chips in one header cell. The dot slot is reserved
- * whenever a track is loaded, so the name does not shift on play/pause.
+/* State dot and chips in one header cell (the name now lives in the time box,
+ * see mp_time_label). The dot slot is reserved whenever a track is loaded, so
+ * the chips do not shift on play/pause.
  * Chips drop from the end of the list (the last ones first) when the name
  * would get shorter than MP_STATUS_NAME_MIN. */
 void
@@ -1515,9 +1516,8 @@ mp_status_row(struct nk_context *ctx, float scale, const struct MpTheme *th,
     struct nk_command_buffer *canvas;
     const struct nk_user_font *font = ctx->style.font;
     enum nk_widget_layout_states state;
-    float dot_slot, name_x, name_w, chips_w = 0.0f, min_w;
+    float dot_slot, min_w;
     int shown = nchips;
-    char elided[600];
 
     state = nk_widget(&row, ctx);
     if (state == NK_WIDGET_INVALID)
@@ -1542,16 +1542,10 @@ mp_status_row(struct nk_context *ctx, float scale, const struct MpTheme *th,
             right_w += mp_chip_w(font, chips[k], scale) +
                 mp_s(MP_CHIP_GAP, scale);
         if (row.w - dot_slot - right_w >= min_w || shown == 0) {
-            chips_w = right_w;
             break;
         }
         shown--;
     }
-
-    name_x = row.x + dot_slot;
-    name_w = row.w - dot_slot - chips_w;
-    if (name_w < 1.0f)
-        name_w = 1.0f;
 
     /* The dot: a solid accent with a halo while playing, a hollow ring while
      * paused, nothing when stopped. The accent is a state signal here, not
@@ -1580,12 +1574,6 @@ mp_status_row(struct nk_context *ctx, float scale, const struct MpTheme *th,
                              mp_col_alpha(th->accent_a, 180));
         }
     }
-
-    mp_elide(font, name, name_w, elided, sizeof elided);
-    mp_draw_line(canvas, font,
-                 nk_rect(name_x, row.y + (row.h - font->height) * 0.5f,
-                         name_w, font->height),
-                 elided, th->text_primary);
 
     if (shown > 0)
         mp_chips_right(canvas, font, th, row, chips, shown, scale);
@@ -1634,18 +1622,21 @@ mp_error_panel(struct nk_context *ctx, float scale, const struct MpTheme *th,
         nk_tooltip(ctx, text);
 }
 
-/* "cur / total": the current time in text_primary, the total in
- * text_secondary. The font is monospaced, so the centring maths is stable. */
+/* Track name (elided, tooltip when cut) on the top half, then "cur / total" on
+ * the bottom half: the current time in text_primary, the total in
+ * text_secondary. With no name the time sits centred, as before. The font is
+ * monospaced, so the centring maths is stable. */
 void
 mp_time_label(struct nk_context *ctx, const struct MpTheme *th,
-    const char *cur, const char *total)
+    const char *name, const char *cur, const char *total)
 {
     struct nk_rect row;
     struct nk_command_buffer *canvas;
     const struct nk_user_font *font = ctx->style.font;
     enum nk_widget_layout_states state;
     float wc, wsep, wt, x;
-    float y;
+    float y, half;
+    char elided[600];
 
     state = nk_widget(&row, ctx);
     if (state == NK_WIDGET_INVALID)
@@ -1656,7 +1647,23 @@ mp_time_label(struct nk_context *ctx, const struct MpTheme *th,
     wsep = mp_text_w(font, " / ");
     wt = mp_text_w(font, total);
     x = row.x + (row.w - (wc + wsep + wt)) * 0.5f;
-    y = row.y + (row.h - font->height) * 0.5f;
+    half = row.h * 0.5f;
+
+    if (name && name[0]) {
+        struct nk_rect top = nk_rect(row.x, row.y, row.w, half);
+
+        mp_elide(font, name, row.w, elided, sizeof elided);
+        mp_draw_line(canvas, font,
+                     nk_rect(row.x, row.y + (half - font->height) * 0.5f,
+                             row.w, font->height),
+                     elided, th->text_primary);
+        if (strcmp(elided, name) != 0 &&
+            nk_input_is_mouse_hovering_rect(&ctx->input, top))
+            nk_tooltip(ctx, name);
+        y = row.y + half + (half - font->height) * 0.5f;
+    } else {
+        y = row.y + (row.h - font->height) * 0.5f;
+    }
 
     mp_draw_line(canvas, font, nk_rect(x, y, wc, font->height), cur,
                  th->text_primary);

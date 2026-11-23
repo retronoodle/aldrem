@@ -192,8 +192,8 @@ void mp_dock_end(struct nk_context *ctx);
  * enum, so theme code never depends on the playback module. */
 enum mp_play_state { MP_PS_STOPPED, MP_PS_PLAYING, MP_PS_PAUSED };
 
-/* Header cell: filename (elided) with a state dot, and metadata chips on the
- * right. `name` NULL draws "no file loaded". Each lays out one row cell. */
+/* Header cell: a state dot and metadata chips on the right. `name` is only the
+ * loaded flag: NULL draws "no file loaded". Each lays out one row cell. */
 void mp_status_row(struct nk_context *ctx, float scale, const struct MpTheme *th,
     const char *name, const char *const *chips, int nchips,
     enum mp_play_state ps);
@@ -202,9 +202,10 @@ void mp_status_row(struct nk_context *ctx, float scale, const struct MpTheme *th
 void mp_error_panel(struct nk_context *ctx, float scale, const struct MpTheme *th,
     const char *text);
 
-/* "cur / total" with the current time primary and the total secondary. */
+/* Name (elided) on top, "cur / total" below. The name is optional (NULL or
+ * empty centres the time). */
 void mp_time_label(struct nk_context *ctx, const struct MpTheme *th,
-    const char *cur, const char *total);
+    const char *name, const char *cur, const char *total);
 
 /* A label in text_muted, for hints. `align` is an NK_TEXT_* flag. */
 void mp_label_muted(struct nk_context *ctx, const struct MpTheme *th,

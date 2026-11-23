@@ -10,6 +10,10 @@
 #include <sys/stat.h>
 
 #include <SDL.h>
+#ifdef HAVE_X11
+#include <SDL_syswm.h>
+#include <X11/Xlib.h>
+#endif
 
 #define NK_IMPLEMENTATION
 #include "nuklear_config.h"
@@ -71,6 +75,56 @@ extern const unsigned char aldrem_icon_end[];
  * stable, so fall back to it rather than failing to compile. */
 #ifndef SDL_HINT_APP_NAME
 #define SDL_HINT_APP_NAME "SDL_APP_NAME"
+#endif
+
+#ifdef HAVE_X11
+/* Tells the launcher the app has started (freedesktop startup-notification
+ * "remove" message). GNOME passes DESKTOP_STARTUP_ID even when the .desktop
+ * says StartupNotify=false, and SDL2's X11 backend ignores it, so without this
+ * the busy cursor and the missing dock icon last until the shell times out. */
+static void
+x11_startup_complete(SDL_Window *win)
+{
+    const char *id = getenv("DESKTOP_STARTUP_ID");
+    SDL_SysWMinfo wm;
+    char msg[512];
+    size_t n, len, off;
+
+    if (!id || !*id)
+        return;
+    SDL_VERSION(&wm.version);
+    if (!SDL_GetWindowWMInfo(win, &wm) || wm.subsystem != SDL_SYSWM_X11)
+        return; /* the Wayland backend handles XDG_ACTIVATION_TOKEN itself */
+
+    /* Spec escaping: backslash before space, double quote and backslash. */
+    n = (size_t)snprintf(msg, sizeof msg, "remove: ID=");
+    for (const char *p = id; *p && n < sizeof msg - 3; p++) {
+        if (*p == ' ' || *p == '"' || *p == '\\')
+            msg[n++] = '\\';
+        msg[n++] = *p;
+    }
+    msg[n] = '\0';
+    len = n + 1; /* the terminating NUL is part of the message */
+
+    Display *dpy = wm.info.x11.display;
+    Atom begin = XInternAtom(dpy, "_NET_STARTUP_INFO_BEGIN", False);
+    Atom more = XInternAtom(dpy, "_NET_STARTUP_INFO", False);
+    for (off = 0; off < len; off += 20) {
+        XEvent ev;
+        size_t chunk = len - off < 20 ? len - off : 20;
+
+        memset(&ev, 0, sizeof ev);
+        ev.xclient.type = ClientMessage;
+        ev.xclient.display = dpy;
+        ev.xclient.window = wm.info.x11.window;
+        ev.xclient.message_type = off == 0 ? begin : more;
+        ev.xclient.format = 8;
+        memcpy(ev.xclient.data.b, msg + off, chunk);
+        XSendEvent(dpy, DefaultRootWindow(dpy), False, PropertyChangeMask,
+                   &ev);
+    }
+    XFlush(dpy);
+}
 #endif
 
 /* Renderer output in physical pixels and the backing scale ratio (points to
@@ -502,7 +556,7 @@ ui_vu_overlay(struct nk_context *ctx, float scale, struct MpTheme *th,
 static int
 ui_transport_panel(struct nk_context *ctx, float scale, const struct MpTheme *th,
     const PlaybackStatus *st, Playlist *pl, int modal_active,
-    const char *curbuf, const char *totbuf, float progress,
+    const char *name, const char *curbuf, const char *totbuf, float progress,
     const char *volbuf,
     int *seek_dragging, float *seek_preview, struct UiButtons *ub,
     double *seek_out)
@@ -513,8 +567,8 @@ ui_transport_panel(struct nk_context *ctx, float scale, const struct MpTheme *th
 
     /* The time row shows --:-- when nothing is loaded. The seek bar stays on
      * screen, disabled, so the dock keeps its shape. */
-    nk_layout_row_dynamic(ctx, mp_s(35.0f, scale), 1);
-    mp_time_label(ctx, th, curbuf, totbuf);
+    nk_layout_row_dynamic(ctx, mp_s(52.0f, scale), 1);
+    mp_time_label(ctx, th, name, curbuf, totbuf);
 
     nk_layout_row_dynamic(ctx, mp_s(35.0f, scale), 1);
     if (!st->has_track) {
@@ -1198,6 +1252,9 @@ main(int argc, char **argv)
         }
     }
 #endif
+#ifdef HAVE_X11
+    x11_startup_complete(win);
+#endif
 
     SDL_Renderer *ren = SDL_CreateRenderer(win, -1,
         SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC);
@@ -1284,7 +1341,7 @@ main(int argc, char **argv)
     int seek_dragging = 0;
     float seek_preview = 0.0f;
     double pending_seek = 0.0;
-    char window_title[640] = "";
+    char window_title[1280] = "";
     char **drops = NULL;
     int drop_count = 0, drop_cap = 0;
     int browser_list_mode = 0;
@@ -1446,10 +1503,11 @@ main(int argc, char **argv)
         char curbuf[16];
         char totbuf[16];
         char volbuf[32];
-        char title[640];
+        char title[1280];
         char chbuf[16];
         char bitsbuf[16];
         char ratebuf[24];
+        char nowbuf[1024]; /* station (up to 512) + ": " + title (up to 255) */
         const char *chips[4];
         int nchips = 0;
         enum mp_play_state play_ps;
@@ -1542,11 +1600,19 @@ main(int argc, char **argv)
         if (st.has_track) {
             const char *slash = strrchr(st.name, '/');
             base = slash ? slash + 1 : st.name;
+            if (!st.is_live && st.now_playing[0])
+                base = st.now_playing; /* embedded tags beat the filename */
             if (st.is_live) {
-                /* A stream's URL means little to a reader: show the station. */
+                /* A stream's URL means little to a reader: show the station,
+                 * and the song on it once the server has sent one. */
                 const char *label = playlist_label_at(pl, playlist_current(pl));
 
                 base = label ? label : st.name;
+                if (st.now_playing[0]) {
+                    snprintf(nowbuf, sizeof nowbuf, "%s: %s", base,
+                             st.now_playing);
+                    base = nowbuf;
+                }
             }
         }
 
@@ -1636,13 +1702,15 @@ main(int argc, char **argv)
              * or pushed the group styles, so an unconditional end would pop
              * an empty stack and close a group that was never begun. */
             dock_open = mp_dock_begin(ctx, ui_scale, col,
-                mp_s(140.0f, ui_scale) + 3.0f * mp_s(4.0f, ui_scale),
+                mp_s(157.0f, ui_scale) + 3.0f * mp_s(4.0f, ui_scale),
                 &theme);
             if (dock_open) {
                 double seek = 0.0;
 
                 if (ui_transport_panel(ctx, ui_scale, &theme, &st, pl,
-                                       modal_active, curbuf, totbuf, progress,
+                                       modal_active,
+                                       st.has_track ? base : NULL,
+                                       curbuf, totbuf, progress,
                                        volbuf, &seek_dragging,
                                        &seek_preview, &buttons, &seek))
                     playback_seek(seek);

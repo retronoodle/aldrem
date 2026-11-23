@@ -44,6 +44,18 @@ track_interrupt(Track *t)
         ops->interrupt(t);
 }
 
+int
+track_title(Track *t, char *out, size_t cap)
+{
+    const TrackOps *ops = ops_of(t);
+
+    if (out && cap)
+        out[0] = '\0';
+    if (!ops || !ops->title || !out || !cap)
+        return 0;
+    return ops->title(t, out, cap);
+}
+
 void
 track_close(Track *t)
 {
