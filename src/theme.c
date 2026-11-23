@@ -405,9 +405,10 @@ void
 mp_theme_tick(struct MpTheme *th, float dt)
 {
     th->clock += dt;
-    /* Wrap so the float keeps precision over a long session. */
-    if (th->clock > 1000.0f)
-        th->clock -= 1000.0f;
+    /* Wrap at a common multiple of MP_PULSE_PERIOD and MP_FLOAT_PERIOD
+     * (96 s = 40 pulses = 30 floats) so the phases don't jump on wrap. */
+    if (th->clock > 96.0f)
+        th->clock -= 96.0f;
 }
 
 void
@@ -1742,7 +1743,7 @@ mp_empty_state(struct nk_context *ctx, float scale, const struct MpTheme *th,
     float gap = mp_s(MP_EMPTY_GAP, scale);
     float chip_h = font->height + mp_s(MP_CHIP_H_EXTRA, scale);
     float text_h = font->height;
-    float fixed, disc = 0.0f, total, y, cx;
+    float fixed, disc = 0.0f, total, y, dy = 0.0f, cx;
     int shown = nchips, i;
 
     state = nk_widget(&row, ctx);
@@ -1760,23 +1761,28 @@ mp_empty_state(struct nk_context *ctx, float scale, const struct MpTheme *th,
     y = row.y + (row.h - total) * 0.5f;
     if (y < row.y)
         y = row.y;
-    /* Gentle float of the disc: +/-2 pt over MP_FLOAT_PERIOD. */
-    if (disc > 0.0f && !th->reduce_motion)
-        y += mp_s(2.0f, scale) *
+    /* Gentle float of the disc only: +/-2 pt over MP_FLOAT_PERIOD. The text
+     * and chips stay put, and the disc never rises above its row. */
+    if (disc > 0.0f && !th->reduce_motion) {
+        dy = mp_s(2.0f, scale) *
              sinf(2.0f * MP_PI * th->clock / MP_FLOAT_PERIOD);
+        if (y + dy < row.y)
+            dy = row.y - y;
+    }
     cx = row.x + row.w * 0.5f;
 
     if (disc > 0.0f) {
-        struct nk_rect dr = nk_rect(cx - disc * 0.5f, y, disc, disc);
+        float top = y + dy;
+        struct nk_rect dr = nk_rect(cx - disc * 0.5f, top, disc, disc);
         float hub = disc * 0.22f;
-        struct nk_rect hr = nk_rect(cx - hub * 0.5f, y + (disc - hub) * 0.5f,
+        struct nk_rect hr = nk_rect(cx - hub * 0.5f, top + (disc - hub) * 0.5f,
                                     hub, hub);
 
         nk_fill_circle(canvas, dr, th->surface);
         nk_stroke_circle(canvas, dr, mp_s(1.0f, scale), th->border);
         /* A groove ring inside the disc, then the accent rim on top. */
         nk_stroke_circle(canvas,
-            nk_rect(cx - disc * 0.36f, y + disc * 0.14f,
+            nk_rect(cx - disc * 0.36f, top + disc * 0.14f,
                     disc * 0.72f, disc * 0.72f),
             mp_s(1.0f, scale), mp_col_alpha(th->border_strong, 140));
         nk_stroke_circle(canvas,
