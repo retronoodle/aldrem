@@ -697,9 +697,8 @@ main(int argc, char **argv)
     buttons.seek.handle = 1.0f;
     buttons.vol.handle = 1.0f;
 
-    /* Phase 7 placeholder: a real per-frame dt replaces this clamped millisecond
-     * delta, and the widgets' easing call sites stay the same. */
-    Uint32 last_ticks = SDL_GetTicks();
+    /* Per-frame dt comes from the high-resolution counter (see the loop). */
+    Uint64 last_ticks = SDL_GetPerformanceCounter();
 
     while (running) {
         /* Derive sizes fresh each frame: the resize event values are points,
@@ -837,16 +836,19 @@ main(int argc, char **argv)
         browser_open = file_browser_is_open(browser);
         modal_active = save_modal_open || browser_open;
 
-        /* One dt per frame for the hover/press easing, clamped so a stalled
-         * window (a drag, a resize) cannot jump an animation to its end. */
+        /* One dt per frame for the easing and the theme clock, clamped so a
+         * stalled window (a drag, a resize) cannot jump an animation to its
+         * end. */
         {
-            Uint32 now = SDL_GetTicks();
-            Uint32 span = now - last_ticks;
+            Uint64 now = SDL_GetPerformanceCounter();
+            double span = (double)(now - last_ticks) /
+                          (double)SDL_GetPerformanceFrequency();
 
             last_ticks = now;
-            if (span > 100)
-                span = 100;
-            buttons.opt.dt = (float)span / 1000.0f;
+            if (span > 0.1)
+                span = 0.1;
+            buttons.opt.dt = (float)span;
+            mp_theme_tick(&theme, buttons.opt.dt);
         }
         buttons.opt.focus_slot = buttons.focus;
 

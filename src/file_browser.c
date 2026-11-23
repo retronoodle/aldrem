@@ -37,6 +37,9 @@ typedef struct {
 
 struct FileBrowser {
     int open;
+    /* Footer press state, held per browser (calloc'd, so it starts zeroed). */
+    struct MpAnim open_anim;
+    struct MpAnim cancel_anim;
     char dir[FB_PATH_MAX];
     char last_dir[FB_PATH_MAX];
     int has_last_dir;
@@ -326,12 +329,6 @@ fb_s(float v, float scale)
     return lroundf(v * scale);
 }
 
-/* Footer press state: kept here rather than on the stack so a press that spans
- * frames still resolves. Nuklear is immediate-mode, so nothing survives a
- * frame unless we hold it. */
-static struct MpAnim fb_open_anim;
-static struct MpAnim fb_cancel_anim;
-
 int
 file_browser_draw(FileBrowser *fb, struct nk_context *ctx, float scale,
     struct MpTheme *theme, float dt, float screen_w, float screen_h,
@@ -460,10 +457,10 @@ file_browser_draw(FileBrowser *fb, struct nk_context *ctx, float scale,
             opt.dt = dt;
             if (mp_button(ctx, scale, theme, "Open", MP_BTN_PRIMARY,
                           MP_ICON_PLAY, 0, fb->selected >= 0 && !loading,
-                          &fb_open_anim, &opt))
+                          &fb->open_anim, &opt))
                 chosen = fb->selected;
             if (mp_button(ctx, scale, theme, "Cancel", MP_BTN_NEUTRAL,
-                          MP_ICON_STOP, 0, 1, &fb_cancel_anim, &opt))
+                          MP_ICON_STOP, 0, 1, &fb->cancel_anim, &opt))
                 cancelled = 1;
         } else {
             if (fb->selected < 0 || loading)

@@ -168,6 +168,9 @@ mp_theme_init(struct MpTheme *th, SDL_Renderer *ren)
 {
     memset(th, 0, sizeof *th);
     th->scale = 1.0f;
+    th->reduce_motion = getenv("MEDIAPLAYER_REDUCE_MOTION") != NULL &&
+                        getenv("MEDIAPLAYER_REDUCE_MOTION")[0] != '\0' &&
+                        strcmp(getenv("MEDIAPLAYER_REDUCE_MOTION"), "0") != 0;
     th->bg_top = MP_BG_TOP;
     th->bg_bottom = MP_BG_BOTTOM;
     th->ambient_cyan = MP_AMBIENT_CYAN;
@@ -399,6 +402,15 @@ mp_theme_backdrop(SDL_Renderer *ren, int w, int h, struct MpTheme *th)
 }
 
 void
+mp_theme_tick(struct MpTheme *th, float dt)
+{
+    th->clock += dt;
+    /* Wrap so the float keeps precision over a long session. */
+    if (th->clock > 1000.0f)
+        th->clock -= 1000.0f;
+}
+
+void
 mp_theme_shutdown(struct MpTheme *th)
 {
     if (th->ambient_glow) {
@@ -546,6 +558,11 @@ mp_dock_end(struct nk_context *ctx)
  * exponential form makes a slow frame ease proportionally, not jump. */
 #define MP_HOVER_TAU        0.060f
 #define MP_PRESS_TAU        0.030f
+#define MP_GLOW_TAU         0.300f
+/* Animation periods in seconds: the playing pulse and the empty-disc float. */
+#define MP_PULSE_PERIOD     2.4f
+#define MP_FLOAT_PERIOD     3.2f
+#define MP_PI               3.14159265358979f
 
 float
 mp_button_height(enum mp_btn_kind kind)
@@ -560,6 +577,14 @@ mp_ease(float a, float target, float dt, float tau)
     if (dt <= 0.0f)
         return a;
     return a + (target - a) * (1.0f - expf(-dt / tau));
+}
+
+/* mp_ease, or the end state at once under reduce-motion. */
+static float
+mp_ease_th(const struct MpTheme *th, float a, float target, float dt,
+           float tau)
+{
+    return th->reduce_motion ? target : mp_ease(a, target, dt, tau);
 }
 
 /* Scales a colour's RGB; keep its alpha. The pressed step of every variant. */
@@ -793,9 +818,10 @@ mp_button(struct nk_context *ctx, float scale, const struct MpTheme *th,
      * is not a hover), but only a press that began here sinks the face. */
     if (hovered && nk_input_is_mouse_down(&ctx->input, NK_BUTTON_LEFT))
         hovered = 0;
-    anim->hover = mp_ease(anim->hover, hovered ? 1.0f : 0.0f, dt, MP_HOVER_TAU);
-    anim->press = mp_ease(anim->press, anim->pressed ? 1.0f : 0.0f, dt,
-                          MP_PRESS_TAU);
+    anim->hover = mp_ease_th(th, anim->hover, hovered ? 1.0f : 0.0f, dt,
+                             MP_HOVER_TAU);
+    anim->press = mp_ease_th(th, anim->press, anim->pressed ? 1.0f : 0.0f, dt,
+                             MP_PRESS_TAU);
 
     canvas = nk_window_get_canvas(ctx);
     shift = anim->press * mp_s(1.0f, scale);
@@ -815,6 +841,18 @@ mp_button(struct nk_context *ctx, float scale, const struct MpTheme *th,
                    disabled ? mp_col_alpha(th->border, MP_BTN_DISABLED_A)
                             : mp_col_lerp(th->border, th->border_strong,
                                           anim->hover));
+
+    /* Outer glow: a soft accent ring that fades in on hover. */
+    if (!disabled && anim->hover > 0.0f) {
+        float g = mp_s(3.0f, scale);
+
+        nk_stroke_rect(canvas,
+                       nk_rect(r.x - g, r.y + shift - g, r.w + 2.0f * g,
+                               r.h + 2.0f * g),
+                       radius + g, mp_s(2.0f, scale),
+                       mp_col_alpha(th->accent_a,
+                                    (int)lroundf(40.0f * anim->hover)));
+    }
 
     if (focused && !disabled)
         nk_stroke_rect(canvas,
@@ -1010,6 +1048,15 @@ mp_fill_draw(struct nk_context *ctx, struct nk_rect track, float frac,
     nk_fill_circle(canvas, nk_rect(track.x, cy - r, 2.0f * r, 2.0f * r), a);
     nk_fill_circle(canvas, nk_rect(track.x + w - 2.0f * r, cy - r,
                                    2.0f * r, 2.0f * r), c1);
+    /* Cap highlight: a small pale glint on the leading cap. */
+    if (track.h >= mp_s(5.0f, scale) && w > 2.0f * r) {
+        float hr = r * 0.45f;
+
+        nk_fill_circle(canvas,
+            nk_rect(track.x + w - r - hr * 1.6f, cy - r * 0.55f - hr,
+                    2.0f * hr, 2.0f * hr),
+            mp_col_alpha(MP_HIGHLIGHT, 70));
+    }
 
     /* The wet band: a hairline along the top of the fill, paler at the fill's
      * end. Only the seek track is tall enough to carry it. */
@@ -1141,11 +1188,13 @@ mp_seek_bar(struct nk_context *ctx, float scale, const struct MpTheme *th,
      * bar, not hovering it), matching the buttons. */
     if (hovered && nk_input_is_mouse_down(&ctx->input, NK_BUTTON_LEFT))
         hovered = 0;
-    anim->hover = mp_ease(anim->hover, hovered ? 1.0f : 0.0f, dt, MP_HOVER_TAU);
-    anim->handle = mp_ease(anim->handle,
+    anim->hover = mp_ease_th(th, anim->hover, hovered ? 1.0f : 0.0f, dt,
+                             MP_HOVER_TAU);
+    anim->handle = mp_ease_th(th, anim->handle,
         (hovered || *dragging) ? MP_HANDLE_GROW : 1.0f, dt, MP_HANDLE_TAU);
-    anim->glow = mp_ease(anim->glow, *dragging ? 1.0f : hovered ? 0.5f : 0.0f,
-                         dt, MP_HANDLE_TAU);
+    anim->glow = mp_ease_th(th, anim->glow,
+                            *dragging ? 1.0f : hovered ? 0.5f : 0.0f, dt,
+                            MP_GLOW_TAU);
 
     /* While dragging the fill follows the preview, as the time label beside it
      * does; a disabled bar shows the flat track and nothing else. */
@@ -1312,8 +1361,9 @@ mp_volume_slider(struct nk_context *ctx, float scale, const struct MpTheme *th,
         }
     }
 
-    anim->hover = mp_ease(anim->hover, hovered ? 1.0f : 0.0f, dt, MP_HOVER_TAU);
-    anim->handle = mp_ease(anim->handle,
+    anim->hover = mp_ease_th(th, anim->hover, hovered ? 1.0f : 0.0f, dt,
+                             MP_HOVER_TAU);
+    anim->handle = mp_ease_th(th, anim->handle,
         (hovered || dragging) ? MP_HANDLE_GROW : 1.0f, dt, MP_HANDLE_TAU);
 
     shown = *value;
@@ -1511,9 +1561,16 @@ mp_status_row(struct nk_context *ctx, float scale, const struct MpTheme *th,
 
         if (ps == MP_PS_PLAYING) {
             float g = mp_s(MP_GLOW_RING, scale);
+            /* Slow pulse, 0.12 to 0.30 alpha over MP_PULSE_PERIOD; steady
+             * mid-level under reduce-motion. */
+            float p = th->reduce_motion ? 0.5f
+                : 0.5f + 0.5f * sinf(2.0f * MP_PI * th->clock /
+                                     MP_PULSE_PERIOD);
+            int alpha = (int)lroundf(255.0f * (0.12f + 0.18f * p));
+
             nk_fill_circle(canvas,
                 nk_rect(dr.x - g, dr.y - g, d + 2.0f * g, d + 2.0f * g),
-                mp_col_alpha(th->accent_a, 56));
+                mp_col_alpha(th->accent_a, alpha));
             nk_fill_circle(canvas, dr, th->accent_a);
         } else {
             nk_stroke_circle(canvas, dr, mp_s(1.5f, scale),
@@ -1703,6 +1760,10 @@ mp_empty_state(struct nk_context *ctx, float scale, const struct MpTheme *th,
     y = row.y + (row.h - total) * 0.5f;
     if (y < row.y)
         y = row.y;
+    /* Gentle float of the disc: +/-2 pt over MP_FLOAT_PERIOD. */
+    if (disc > 0.0f && !th->reduce_motion)
+        y += mp_s(2.0f, scale) *
+             sinf(2.0f * MP_PI * th->clock / MP_FLOAT_PERIOD);
     cx = row.x + row.w * 0.5f;
 
     if (disc > 0.0f) {
