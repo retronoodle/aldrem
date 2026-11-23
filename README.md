@@ -1,5 +1,7 @@
 # mediaplayer
 
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+
 **A tiny desktop audio player, written in pure C.**
 
 No Electron. No webview. No package manager tail. One small C99 codebase, SDL2 for the window and audio, Nuklear for the GUI, and vendored single-header decoders for everything else. It builds into a single binary and plays your music.
@@ -126,4 +128,8 @@ Shared state (position, duration, volume, status) sits behind a single mutex; th
 - [dr_flac](https://github.com/mackron/dr_libs) — public domain FLAC decoder (vendored)
 - [stb_vorbis](https://github.com/nothings/stb) — public domain Ogg Vorbis decoder (vendored)
 
-Licenses for the vendored libraries live alongside them in [`vendor/`](vendor/).
+Licenses for the vendored libraries live alongside them in [`vendor/`](vendor/); each vendored header keeps its own upstream license (Nuklear, minimp3, dr_flac and stb_vorbis are public domain/MIT-0, SDL2 is zlib).
+
+## License
+
+[MIT](LICENSE) © 2026 Tim Monaghan. This includes the app icon (`packaging/`).
