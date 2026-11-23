@@ -131,6 +131,21 @@ ui_base_name(const char *path)
     return slash ? slash + 1 : path;
 }
 
+/* Row label: the basename without its extension. Paths stay untouched; this is
+ * display only. A leading dot is part of the name, not an extension. */
+static void
+ui_track_label(const char *path, char *out, size_t outlen)
+{
+    const char *base = ui_base_name(path);
+    const char *dot = strrchr(base, '.');
+    size_t n = dot && dot != base ? (size_t)(dot - base) : strlen(base);
+
+    if (n >= outlen)
+        n = outlen - 1;
+    memcpy(out, base, n);
+    out[n] = '\0';
+}
+
 /* SDL frees evt.drop.file when the event is done, so each path is copied.
  * Drops arrive one event per file; this keeps them together for one batch. */
 static int
@@ -320,17 +335,11 @@ ui_playlist_panel(Playlist *pl, struct nk_context *ctx, float scale,
 
             nk_layout_row_dynamic(ctx, row_h, 1);
             for (i = view.begin; i < view.end; i++) {
-                const char *base = ui_base_name(playlist_path_at(pl, i));
-                char text[4100];
+                char text[512];
                 struct nk_rect bounds;
                 nk_bool sel = (i == selected) ? nk_true : nk_false;
 
-                /* ">" marks the playing row: the default Nuklear font has no
-                 * glyph for a play triangle. */
-                if (i == current)
-                    snprintf(text, sizeof text, "> %s", base);
-                else
-                    snprintf(text, sizeof text, "%s", base);
+                ui_track_label(playlist_path_at(pl, i), text, sizeof text);
 
                 /* Read the row rect before drawing it: nk_widget_bounds peeks
                  * at the next slot, so asking after the label names the row
@@ -350,6 +359,19 @@ ui_playlist_panel(Playlist *pl, struct nk_context *ctx, float scale,
                  * stays in the Playlist struct (see playlist_select). */
                 if (nk_selectable_label(ctx, text, NK_TEXT_LEFT, &sel))
                     playlist_select(pl, i);
+
+                /* The playing row gets a cyan tint and a left bar, drawn over
+                 * the row after the label so the bar is never painted under it. */
+                if (i == current) {
+                    struct nk_command_buffer *canvas = nk_window_get_canvas(ctx);
+
+                    nk_fill_rect(canvas, bounds, 0.0f,
+                                 mp_col_alpha(th->accent_a, 26));
+                    nk_fill_rect(canvas,
+                                 nk_rect(bounds.x, bounds.y,
+                                         mp_s(3.0f, scale), bounds.h),
+                                 0.0f, th->accent_a);
+                }
             }
             nk_list_view_end(&view);
         }
@@ -411,6 +433,8 @@ ui_transport_panel(struct nk_context *ctx, float scale, const struct MpTheme *th
     float volume = (float)st->volume_percent / 100.0f;
     int slider_live;
 
+    /* The time row carries the drop hint when nothing is loaded (timebuf). The
+     * seek bar stays on screen, disabled, so the dock keeps its shape. */
     nk_layout_row_dynamic(ctx, mp_s(35.0f, scale), 1);
     mp_time_label(ctx, th, curbuf, totbuf);
 
@@ -447,20 +471,20 @@ ui_transport_panel(struct nk_context *ctx, float scale, const struct MpTheme *th
                   &ub->next, &ub->opt))
         playlist_next(pl);
 
-    /* Volume label + slider; live with or without a track, disabled while a
-     * dialog is up or no audio device opened. The slider takes `enabled`
-     * rather than the window disable flag: nk_widget_disable_begin would set
-     * that flag for the whole dock, which would take the seek bar and the
-     * transport with it. */
+    /* Volume slider (speaker glyph leads it) with the percentage dimmed on the
+     * right; live with or without a track, disabled while a dialog is up or no
+     * audio device opened. The slider takes `enabled` rather than the window
+     * disable flag: nk_widget_disable_begin would set that flag for the whole
+     * dock, which would take the seek bar and the transport with it. */
     nk_layout_row_template_begin(ctx, mp_s(30.0f, scale));
-    nk_layout_row_template_push_static(ctx, mp_s(60.0f, scale));
     nk_layout_row_template_push_dynamic(ctx);
+    nk_layout_row_template_push_static(ctx, mp_s(48.0f, scale));
     nk_layout_row_template_end(ctx);
     slider_live = !modal_active && playback_available();
-    nk_label(ctx, volbuf, NK_TEXT_LEFT);
     if (mp_volume_slider(ctx, scale, th, &volume, slider_live, ub->opt.dt,
                          &ub->vol))
         playback_set_volume((int)lroundf(volume * 100.0f));
+    nk_label_colored(ctx, volbuf, NK_TEXT_RIGHT, th->text_secondary);
 
     return released;
 }
@@ -873,7 +897,7 @@ main(int argc, char **argv)
         if (progress > 1.0f)
             progress = 1.0f;
 
-        snprintf(volbuf, sizeof volbuf, "vol %d%%", st.volume_percent);
+        snprintf(volbuf, sizeof volbuf, "%d%%", st.volume_percent);
 
         base = "";
         if (st.has_track) {

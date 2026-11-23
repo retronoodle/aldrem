@@ -284,10 +284,14 @@ mp_theme_apply(struct nk_context *ctx, float scale, struct MpTheme *th)
     st->selectable.normal = nk_style_item_color(th->surface);
     st->selectable.hover = nk_style_item_color(th->surface_hover);
     st->selectable.pressed = nk_style_item_color(th->surface_active);
-    /* Selected rows use the active step; Phase 6 adds the accent bar. */
-    st->selectable.normal_active = nk_style_item_color(th->surface_active);
-    st->selectable.hover_active = nk_style_item_color(th->surface_active);
-    st->selectable.pressed_active = nk_style_item_color(th->surface_active);
+    /* Selected rows: surface_active with a cyan tint, so they stand out from
+     * the plain surface rows and the playing-row accent bar. */
+    st->selectable.normal_active = nk_style_item_color(
+        mp_col_lerp(th->surface_active, th->accent_a, 0.14f));
+    st->selectable.hover_active = nk_style_item_color(
+        mp_col_lerp(th->surface_active, th->accent_a, 0.22f));
+    st->selectable.pressed_active = nk_style_item_color(
+        mp_col_lerp(th->surface_active, th->accent_a, 0.22f));
     st->selectable.text_normal = th->text_primary;
     st->selectable.text_hover = th->text_primary;
     st->selectable.text_pressed = th->text_primary;
@@ -824,7 +828,11 @@ mp_button(struct nk_context *ctx, float scale, const struct MpTheme *th,
         float pad = mp_s(MP_BTN_LABEL_PAD, scale);
         struct nk_color ink = accent ? th->accent_ink : th->text_primary;
 
-        tr = nk_rect(r.x + pad, r.y + shift, r.w - 2.0f * pad, r.h);
+        /* nk_draw_text top-aligns in its rect, so centre the line vertically
+         * by hand. */
+        tr = nk_rect(r.x + pad,
+                     r.y + shift + (r.h - ctx->style.font->height) * 0.5f,
+                     r.w - 2.0f * pad, ctx->style.font->height);
         /* A fully transparent background: the text draws its own glyphs and
          * the face beneath it is already painted. */
         nk_draw_text(canvas, tr, label, (int)strlen(label), ctx->style.font,
