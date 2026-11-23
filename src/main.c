@@ -26,6 +26,27 @@
 #define UI_FONT_BASE 19.0f
 #define APP_DISPLAY_NAME "Aldrem"
 
+/* nk_sdl_handle_event feeds NK_BUTTON_DOUBLE for every left click with
+ * `clicks > 1`, so a triple click would look like a second double click and
+ * replay the row. Hand SDL only two-click downs to Nuklear and swallow the
+ * rest: the app's only double-click consumer (playlist rows) then fires once
+ * per double click. Clicks above 2 would reset SDL's counter, so they are
+ * dropped entirely rather than forwarded as plain left presses.
+ * `forward` holds the event as Nuklear should see it. */
+static int
+ui_handle_event(const SDL_Event *evt)
+{
+    SDL_Event forward = *evt;
+
+    if (evt->type == SDL_MOUSEBUTTONDOWN &&
+        evt->button.button == SDL_BUTTON_LEFT && evt->button.clicks > 1) {
+        if (evt->button.clicks > 2)
+            return 0;
+        forward.button.clicks = 2;
+    }
+    return nk_sdl_handle_event(&forward);
+}
+
 /* The window icon is a BMP baked into the binary by the Makefile (objcopy of
  * build/icon-256.bmp, rendered from packaging/aldrem.svg). SDL_LoadBMP reads
  * BMP only, which keeps SDL_image out of the dependency list. Defined only on
@@ -243,7 +264,6 @@ ui_save_path_default(char *out, size_t outlen)
 }
 
 #define PL_ROW_H           24.0f
-#define PL_DOUBLE_CLICK_MS 400
 
 enum {
     PL_ACTION_NONE      = 0,
@@ -283,9 +303,6 @@ static int
 ui_playlist_panel(Playlist *pl, struct nk_context *ctx, float scale,
     int disabled)
 {
-    static int last_click = -1;
-    static Uint32 last_click_ms = 0;
-
     char header[64];
     float row_h = mp_s(PL_ROW_H, scale);
     float bar_h = mp_s(28.0f, scale);
@@ -354,6 +371,8 @@ ui_playlist_panel(Playlist *pl, struct nk_context *ctx, float scale,
             for (i = view.begin; i < view.end; i++) {
                 const char *base = ui_base_name(playlist_path_at(pl, i));
                 char text[4100];
+                struct nk_rect bounds;
+                nk_bool sel = (i == selected) ? nk_true : nk_false;
 
                 /* ">" marks the playing row: the default Nuklear font has no
                  * glyph for a play triangle. */
@@ -362,21 +381,24 @@ ui_playlist_panel(Playlist *pl, struct nk_context *ctx, float scale,
                 else
                     snprintf(text, sizeof text, "%s", base);
 
-                /* Nonzero return means clicked; the value is only a render
-                 * flag, so the truth stays in the Playlist struct. */
-                if (nk_select_label(ctx, text, NK_TEXT_LEFT, i == selected)) {
-                    Uint32 now = SDL_GetTicks();
+                /* Read the row rect before drawing it: nk_widget_bounds peeks
+                 * at the next slot, so asking after the label names the row
+                 * below. Double click plays the row; NK_BUTTON_DOUBLE comes
+                 * from the input pump, which forwards only two-click downs,
+                 * so this fires once per double click. ROM mode already
+                 * blocks input, but keep the guard so rows stay inert behind
+                 * a modal. */
+                bounds = nk_widget_bounds(ctx);
+                if (!disabled &&
+                    nk_input_mouse_clicked(&ctx->input, NK_BUTTON_DOUBLE,
+                                           bounds))
+                    activate = i;
 
-                    if (last_click == i &&
-                        now - last_click_ms < PL_DOUBLE_CLICK_MS) {
-                        activate = i;
-                        last_click = -1;
-                    } else {
-                        playlist_select(pl, i);
-                        last_click = i;
-                        last_click_ms = now;
-                    }
-                }
+                /* Single click selects a row. The return value is "was
+                 * clicked", so it needs a local selection flag: the truth
+                 * stays in the Playlist struct (see playlist_select). */
+                if (nk_selectable_label(ctx, text, NK_TEXT_LEFT, &sel))
+                    playlist_select(pl, i);
             }
             nk_list_view_end(&view);
         }
@@ -387,14 +409,10 @@ ui_playlist_panel(Playlist *pl, struct nk_context *ctx, float scale,
     /* Deferred mutations: the row loop above indexed this list this frame. */
     if (activate >= 0)
         playlist_play_index(pl, activate);
-    if (want_remove) {
+    if (want_remove)
         playlist_remove_selected(pl);
-        last_click = -1;
-    }
-    if (want_clear) {
+    if (want_clear)
         playlist_clear(pl);
-        last_click = -1;
-    }
     return actions;
 }
 
@@ -743,7 +761,7 @@ main(int argc, char **argv)
             }
             ui_scale_mouse_event(&evt, ratio);
             if (!consumed)
-                nk_sdl_handle_event(&evt);
+                ui_handle_event(&evt);
         }
         nk_input_end(ctx);
 
