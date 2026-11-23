@@ -43,11 +43,15 @@ vu_ballistics_update(VuBallistics *b, float level, float peak,
                      float dt, int snap)
 {
     const float target = vu_norm(level);
-    const float peak_target = vu_norm(peak);
+
+    /* `peak` is unused: the marker marks the bar's own highs, so it follows
+     * the eased needle rather than the raw sample peak (which always leads
+     * the RMS body). The parameter stays so callers need no change. */
+    (void)peak;
 
     if (snap) {
         b->needle = target;
-        b->peak = peak_target;
+        b->peak = target;
         b->peak_age = 0.0f;
         return;
     }
@@ -56,15 +60,15 @@ vu_ballistics_update(VuBallistics *b, float level, float peak,
     b->needle = ease(b->needle, target, dt,
                      target > b->needle ? VU_ATTACK_S : VU_RELEASE_S);
 
-    if (peak_target >= b->peak) {
-        b->peak = peak_target;
+    if (b->needle >= b->peak) {
+        b->peak = b->needle;
         b->peak_age = 0.0f;
     } else {
         b->peak_age += dt;
         if (b->peak_age > VU_PEAK_HOLD_S) {
             b->peak -= VU_PEAK_FALL * dt;
-            if (b->peak < peak_target)
-                b->peak = peak_target;
+            if (b->peak < b->needle)
+                b->peak = b->needle;
             if (b->peak < 0.0f)
                 b->peak = 0.0f;
         }

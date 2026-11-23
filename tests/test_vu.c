@@ -40,9 +40,8 @@ main(void)
     CHECK(b.needle > 0.5f, "needle falls slowly on release");
 
     /* Peak marker holds for about a second, then falls. */
-    b.peak = 0.0f;
-    b.peak_age = 0.0f;
-    vu_ballistics_update(&b, 1.0f, 1.0f, 1.0f / 60.0f, 0);
+    for (i = 0; i < 60; i++)
+        vu_ballistics_update(&b, 1.0f, 1.0f, 1.0f / 60.0f, 0);
     for (i = 0; i < 30; i++)
         vu_ballistics_update(&b, 0.0f, 0.0f, 1.0f / 60.0f, 0);
     CHECK(near(b.peak, vu_norm(1.0f), 1e-3f), "peak holds during hold time");
@@ -53,6 +52,22 @@ main(void)
     /* Snap jumps straight to target, used when reduce-motion is set. */
     vu_ballistics_update(&b, 0.5f, 0.5f, 1.0f / 60.0f, 1);
     CHECK(near(b.needle, vu_norm(0.5f), 1e-6f), "snap sets needle directly");
+    CHECK(near(b.peak, vu_norm(0.5f), 1e-6f), "snap sets marker to the bar");
+
+    /* The marker tracks the bar on the way up, never above it. */
+    {
+        VuBallistics m = { 0.0f, 0.0f, 0.0f };
+        for (i = 0; i < 30; i++)
+            vu_ballistics_update(&m, 0.5f, 1.0f, 1.0f / 60.0f, 0);
+        CHECK(m.peak <= m.needle + 1e-6f, "marker never leads the bar");
+        CHECK(m.peak > 0.0f, "marker rises with the bar");
+
+        /* A hot sample peak with a quiet body must not move the marker. */
+        VuBallistics q = { 0.0f, 0.0f, 0.0f };
+        for (i = 0; i < 60; i++)
+            vu_ballistics_update(&q, 0.1f, 1.0f, 1.0f / 60.0f, 0);
+        CHECK(q.peak <= q.needle + 1e-6f, "raw peak does not drive the marker");
+    }
 
     if (failures) {
         fprintf(stderr, "test_vu: %d failure(s)\n", failures);

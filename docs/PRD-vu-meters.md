@@ -8,7 +8,7 @@ Show stereo output levels in the top-right corner of the window, in one of two s
 
 - **Placement:** pinned to the top-right corner of the window, as its own overlay window (not inside the centred column). The header row reserves matching space on its right so the status text stops short of it.
 - **Styles:** `Needle` (twin dials, red warning zone above 85%) and `LED` (two stacked 20-segment bars, green/amber/red by scale position, with a peak-hold marker). A single chip in the meter's row toggles between them.
-- **Signal:** per-channel RMS (needle, LED body) and peak (LED peak marker), measured in the audio callback after volume. Mono is duplicated to both channels. Silence when not playing.
+- **Signal:** per-channel RMS (needle, LED body), measured in the audio callback after volume. Mono is duplicated to both channels. Silence when not playing. The LED peak marker is the held maximum of the displayed bar (never above it), so it only marks peaks; the raw sample peak is not used by the meter.
 - **Ballistics:** fast attack (~10 ms), slow release (~300 ms), peak hold ~1 s then fall. Under `MEDIAPLAYER_REDUCE_MOTION` the meter snaps instead of easing.
 - **Persistence:** style saved to `$XDG_CONFIG_HOME/aldrem/settings.ini` (fallback `~/.config/aldrem/`). A missing or unknown file means LED.
 - **Constraints:** C99, no new dependencies, no locks or allocations in the audio callback (levels travel as fixed-point `SDL_atomic_t`).

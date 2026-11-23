@@ -1903,7 +1903,7 @@ mp_vu_bar(struct nk_command_buffer *canvas, struct nk_rect d, float level,
 
         if ((float)(i + 1) <= lit)
             nk_fill_rect(canvas, s, mp_s(1.0f, scale), c);
-        else if (i == peak_i)
+        else if (i == peak_i && peak_i > (int)lit)
             nk_fill_rect(canvas, s, mp_s(1.0f, scale), th->text_primary);
         else
             nk_fill_rect(canvas, s, mp_s(1.0f, scale), mp_col_alpha(c, 40));
