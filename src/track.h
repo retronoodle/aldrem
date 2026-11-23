@@ -1,6 +1,6 @@
 /* Track — player-agnostic audio source interface.
- * Phase 2 ships only the WAV implementation (track_wav.c); future decoders
- * (e.g. MP3) fill in the same contract.
+ * Implementations (track_wav.c, track_mp3.c, track_flac.c) fill in the same
+ * contract behind an opaque vtable.
  */
 #ifndef TRACK_H
 #define TRACK_H

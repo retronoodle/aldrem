@@ -23,7 +23,7 @@ Source repo: https://github.com/mackron/dr_libs — `master`, header self-report
 
 - `dr_flac.h` — https://raw.githubusercontent.com/mackron/dr_libs/master/dr_flac.h
 
-No modifications. Choice of public domain or MIT-0; license statement at the end of the file. Not wired into the build yet — see `docs/PRD-format-support.md` (Phase A).
+No modifications. Choice of public domain or MIT-0; license statement at the end of the file. Wired into the build via `src/track_flac.c` with `DR_FLAC_NO_OGG`, normalised to interleaved S32. Ogg-encapsulated FLAC and multichannel FLAC are not supported.
 
 ## stb_vorbis
 

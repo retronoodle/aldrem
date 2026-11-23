@@ -1,7 +1,7 @@
 /* mediaplayer — Phase 6: volume control, global Space/up/down shortcuts, an
  * idle hint in the seek row, and a status label that surfaces the decoded
- * format. Drag-and-drop, the in-app browser, WAV/MP3 playback, seeking (arrows)
- * and Esc (close browser or quit) from earlier phases are unchanged.
+ * format. Drag-and-drop, the in-app browser, WAV/MP3/FLAC playback, seeking
+ * (arrows) and Esc (close browser or quit) from earlier phases are unchanged.
  */
 #include <math.h>
 #include <stdio.h>
@@ -479,7 +479,7 @@ main(int argc, char **argv)
             /* row 3: seek bar — click or drag to seek, released on mouse up */
             nk_layout_row_dynamic(ctx, ui_s(35.0f, ui_scale), 1);
             if (!st.has_track) {
-                nk_label(ctx, "drop a .wav or .mp3 here", NK_TEXT_CENTERED);
+                nk_label(ctx, "drop a .wav, .mp3 or .flac here", NK_TEXT_CENTERED);
             } else if (ui_seek_bar(ctx, ui_scale, progress,
                                    !browser_open,
                                    &seek_dragging, &seek_preview)) {

@@ -6,7 +6,7 @@
 #include <stdio.h>
 #include <string.h>
 
-enum { SNIFF_UNKNOWN, SNIFF_WAV, SNIFF_MP3, SNIFF_IOERR };
+enum { SNIFF_UNKNOWN, SNIFF_WAV, SNIFF_MP3, SNIFF_FLAC, SNIFF_IOERR };
 
 static const TrackOps *
 ops_of(Track *t)
@@ -70,7 +70,7 @@ track_ext_supported(const char *name)
 {
     if (!name)
         return 0;
-    return ext_is(name, "wav") || ext_is(name, "mp3");
+    return ext_is(name, "wav") || ext_is(name, "mp3") || ext_is(name, "flac");
 }
 
 /* Reads the first bytes to identify a file whose extension says nothing. */
@@ -92,6 +92,9 @@ sniff(const char *path)
 
     if (n >= 12 && memcmp(buf, "RIFF", 4) == 0 && memcmp(buf + 8, "WAVE", 4) == 0)
         return SNIFF_WAV;
+
+    if (n >= 4 && memcmp(buf, "fLaC", 4) == 0)
+        return SNIFF_FLAC;
 
     if (n >= 3 && memcmp(buf, "ID3", 3) == 0)
         return SNIFF_MP3;
@@ -122,19 +125,24 @@ track_open(const char *path, TrackInfo *info, char *err, size_t errlen)
         return track_wav_open(path, info, err, errlen);
     if (ext_is(path, "mp3"))
         return track_mp3_open(path, info, err, errlen);
+    if (ext_is(path, "flac"))
+        return track_flac_open(path, info, err, errlen);
 
     switch (sniff(path)) {
     case SNIFF_WAV:
         return track_wav_open(path, info, err, errlen);
     case SNIFF_MP3:
         return track_mp3_open(path, info, err, errlen);
+    case SNIFF_FLAC:
+        return track_flac_open(path, info, err, errlen);
     case SNIFF_IOERR:
         if (err && errlen)
             snprintf(err, errlen, "cannot open '%s'", path);
         return NULL;
     default:
         if (err && errlen)
-            snprintf(err, errlen, "unsupported file type '%s': expected .wav or .mp3",
+            snprintf(err, errlen,
+                     "unsupported file type '%s': expected .wav, .mp3 or .flac",
                      path);
         return NULL;
     }
