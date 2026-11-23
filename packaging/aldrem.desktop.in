@@ -1,13 +1,13 @@
 [Desktop Entry]
 Type=Application
-Name=C-Side Media Player
+Name=Aldrem
 GenericName=Audio Player
 Comment=Minimal WAV/MP3/FLAC/Ogg/AIFF player
-Exec=@BINDIR@/mediaplayer %f
-Icon=mediaplayer
+Exec=@BINDIR@/aldrem %f
+Icon=aldrem
 Terminal=false
 Categories=AudioVideo;Audio;Player;
 MimeType=audio/mpeg;audio/wav;audio/x-wav;audio/flac;audio/ogg;audio/x-vorbis+ogg;audio/aiff;audio/x-aiff;audio/x-aifc;
 StartupNotify=true
-StartupWMClass=mediaplayer
-Keywords=c-side;cside;audio;music;player;mp3;wav;flac;ogg;vorbis;aiff;aif;
+StartupWMClass=aldrem
+Keywords=aldrem;audio;music;player;mp3;wav;flac;ogg;vorbis;aiff;aif;

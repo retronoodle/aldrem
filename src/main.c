@@ -1,4 +1,4 @@
-/* mediaplayer — Phase 7: a playlist panel under the player. Drops, Open and
+/* Aldrem — Phase 7: a playlist panel under the player. Drops, Open and
  * multi-select drops append to it, it survives a restart via autosave under the
  * XDG config dir, and it saves to / loads from .m3u. Auto-advance is on; the
  * player rows, global shortcuts, browser and decoders are otherwise unchanged.
@@ -23,7 +23,7 @@
 
 #define UI_DENSITY 0.8f
 #define UI_FONT_BASE 19.0f
-#define APP_DISPLAY_NAME "C-Side Media Player"
+#define APP_DISPLAY_NAME "Aldrem"
 
 /* SDL_HINT_APP_NAME is newer than some SDL2 builds; the literal value is
  * stable, so fall back to it rather than failing to compile. */
@@ -767,7 +767,7 @@ main(int argc, char **argv)
             snprintf(window_title, sizeof window_title, "%s", title);
         }
 
-        if (nk_begin(ctx, "mediaplayer",
+        if (nk_begin(ctx, "aldrem",
                      nk_rect(0, 0, (float)px_w, (float)px_h),
                      NK_WINDOW_NO_SCROLLBAR))
         {

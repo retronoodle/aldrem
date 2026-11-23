@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Render the C-Side Media Player icon to a square RGBA PNG.
+"""Render the Aldrem icon to a square RGBA PNG.
 
 Stdlib-only (zlib, struct, math) so it works on machines with no
-rsvg-convert/inkscape/imagemagick. Mirrors packaging/mediaplayer.svg: a
+rsvg-convert/inkscape/imagemagick. Mirrors packaging/aldrem.svg: a
 rounded-square background with a thick C ring (gap on the right) and a play
 triangle whose apex pokes through the gap, drawn with 4x4 supersampling for
 antialiased edges.

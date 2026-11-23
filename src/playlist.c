@@ -320,7 +320,7 @@ pl_ensure_dir(const char *path)
     return -1;
 }
 
-/* Autosave target: $XDG_CONFIG_HOME/cside-mediaplayer/playlist.m3u, else
+/* Autosave target: $XDG_CONFIG_HOME/aldrem/playlist.m3u, else
  * $HOME/.config/... Leaves autosave empty when no config dir can be made. */
 static void
 playlist_resolve_autosave(Playlist *pl)
@@ -340,7 +340,7 @@ playlist_resolve_autosave(Playlist *pl)
     if (n <= 0 || (size_t)n >= sizeof root)
         return;
 
-    n = snprintf(dir, sizeof dir, "%s/cside-mediaplayer", root);
+    n = snprintf(dir, sizeof dir, "%s/aldrem", root);
     if (n <= 0 || (size_t)n >= sizeof dir)
         return;
 

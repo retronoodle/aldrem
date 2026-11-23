@@ -1,4 +1,4 @@
-# mediaplayer
+# Aldrem
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
@@ -63,7 +63,7 @@ The progress and volume sliders are live: seek mid-track, adjust volume, and it 
 
 Anything you drop or open is appended to the playlist under the player. The track that is already playing keeps playing; when the player is idle, the first added file starts. Double-click a row to jump to it, and the end of a track auto-advances to the next one — playback stops at the end of the list, with no wrap.
 
-The live list is autosaved to `$XDG_CONFIG_HOME/cside-mediaplayer/playlist.m3u` (usually `~/.config/cside-mediaplayer/playlist.m3u`; the same path on macOS) on every change and on quit, and restored at launch. `Save as` writes a standard `.m3u` file you can share or open elsewhere; `Open list` loads one, replacing the current queue. There is no reordering, repeat or shuffle in this version.
+The live list is autosaved to `$XDG_CONFIG_HOME/aldrem/playlist.m3u` (usually `~/.config/aldrem/playlist.m3u`; the same path on macOS) on every change and on quit, and restored at launch. `Save as` writes a standard `.m3u` file you can share or open elsewhere; `Open list` loads one, replacing the current queue. There is no reordering, repeat or shuffle in this version.
 
 ## Build
 
@@ -74,7 +74,7 @@ Requires a C compiler, `make`, `pkg-config`, and SDL2 development headers.
 ```sh
 brew install sdl2
 make
-./mediaplayer
+./aldrem
 ```
 
 **Debian / Ubuntu**
@@ -82,7 +82,7 @@ make
 ```sh
 sudo apt install build-essential pkg-config libsdl2-dev
 make
-./mediaplayer
+./aldrem
 ```
 
 **Fedora**
@@ -90,7 +90,7 @@ make
 ```sh
 sudo dnf install gcc make pkgconf-pkg-config SDL2-devel
 make
-./mediaplayer
+./aldrem
 ```
 
 The build is plain `clang -std=c99 -Wall -Wextra`, and it stays warning-clean.
@@ -102,7 +102,7 @@ make install              # binary + .desktop entry + icon under ~/.local
 make install PREFIX=/usr  # system-wide (with sudo)
 ```
 
-On macOS, `make app` wraps the binary into a proper `mediaplayer.app` bundle with an `.icns` icon.
+On macOS, `make app` wraps the binary into a proper `aldrem.app` bundle with an `.icns` icon.
 
 ## Under the hood
 
