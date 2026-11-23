@@ -21,6 +21,26 @@ SRC := src/main.c src/playback.c src/track.c src/track_wav.c src/track_mp3.c \
        src/track_flac.c src/track_ogg.c src/track_aiff.c src/file_browser.c \
        src/playlist.c vendor/stb_vorbis.c
 OBJ := $(patsubst %.c,build/obj/%.o,$(SRC))
+
+# Runtime window icon: rendered from packaging/aldrem.svg and baked into the
+# binary with objcopy so the window shows an icon even outside a .desktop entry
+# (e.g. `make run`). Skipped on Darwin, where the .app bundle's .icns is used.
+UNAME_S := $(shell uname -s)
+ifneq ($(UNAME_S),Darwin)
+ICON_BMP := build/icon-256.bmp
+ICON_OBJ := build/obj/icon.o
+OBJ      += $(ICON_OBJ)
+CFLAGS   += -DHAVE_EMBED_ICON
+UNAME_M  := $(shell uname -m)
+ifeq ($(UNAME_M),aarch64)
+OBJCOPY_FORMAT := elf64-littleaarch64
+OBJCOPY_ARCH   := aarch64
+else
+OBJCOPY_FORMAT := elf64-x86-64
+OBJCOPY_ARCH   := i386:x86-64
+endif
+endif
+
 HDR := src/playback.h src/track.h src/track_internal.h src/file_browser.h \
        src/playlist.h src/nuklear_config.h vendor/nuklear.h \
        vendor/nuklear_sdl_renderer.h vendor/minimp3.h vendor/dr_flac.h \
@@ -44,11 +64,24 @@ $(TARGET): $(OBJ)
 
 $(OBJ): $(HDR)
 
+ifdef ICON_BMP
+$(ICON_BMP): packaging/make_icon.py packaging/aldrem.svg | build
+	python3 packaging/make_icon.py --bmp 256 $@
+
+$(ICON_OBJ): $(ICON_BMP) | build-obj
+	objcopy -I binary -O $(OBJCOPY_FORMAT) -B $(OBJCOPY_ARCH) \
+	  --rename-section .data=.rodata,alloc,load,readonly,data,contents \
+	  --redefine-sym _binary_build_icon_256_bmp_start=aldrem_icon_start \
+	  --redefine-sym _binary_build_icon_256_bmp_end=aldrem_icon_end \
+	  --redefine-sym _binary_build_icon_256_bmp_size=aldrem_icon_size \
+	  $< $@
+endif
+
 build/obj/%.o: %.c | build-obj
 	$(CC) $(CFLAGS) -c -o $@ $<
 
 build-obj:
-	@mkdir -p build/obj/src build/obj/vendor
+	@mkdir -p build/obj build/obj/src build/obj/vendor
 
 run: $(TARGET)
 	./$(TARGET)

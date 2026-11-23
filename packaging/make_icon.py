@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Render the Aldrem icon to a square RGBA PNG.
+"""Render the Aldrem icon to a square RGBA PNG, or to a 32-bit BMP.
 
 Stdlib-only (zlib, struct, math) so it works on machines with no
 rsvg-convert/inkscape/imagemagick. Mirrors packaging/aldrem.svg: a
@@ -7,7 +7,11 @@ rounded-square background with a thick C ring (gap on the right) and a play
 triangle whose apex pokes through the gap, drawn with 4x4 supersampling for
 antialiased edges.
 
-Usage: python3 packaging/make_icon.py build/icon-1024.png
+The BMP form is embedded in the binary for the runtime window icon, because
+SDL_LoadBMP reads BMP only and this keeps SDL_image out of the dependency list.
+
+Usage: python3 packaging/make_icon.py OUT.png
+       python3 packaging/make_icon.py --bmp SIZE OUT.bmp
 """
 
 import math
@@ -149,6 +153,26 @@ def png_chunk(tag, data):
     return struct.pack(">I", len(data)) + tag + data + struct.pack(">I", crc)
 
 
+def write_bmp(path, size, rgba):
+    """Uncompressed 32-bit BGRA BMP, top-down (negative height)."""
+    stride = size * 4
+    pixels = bytearray()
+    for y in range(size):
+        row = rgba[y * stride:(y + 1) * stride]
+        bgra = bytearray(stride)
+        for x in range(0, stride, 4):
+            bgra[x] = row[x + 2]
+            bgra[x + 1] = row[x + 1]
+            bgra[x + 2] = row[x]
+            bgra[x + 3] = row[x + 3]
+        pixels += bgra
+    header = struct.pack("<2sIHHI", b"BM", 14 + 40 + len(pixels), 0, 0, 54)
+    info = struct.pack("<IiiHHIIiiII", 40, size, -size, 1, 32, 0,
+                       len(pixels), 2835, 2835, 0, 0)
+    with open(path, "wb") as f:
+        f.write(header + info + bytes(pixels))
+
+
 def write_png(path, size, rgba):
     stride = size * 4
     raw = bytearray()
@@ -184,15 +208,31 @@ def render(size):
 
 
 def main(argv):
-    if len(argv) != 2:
-        sys.stderr.write("usage: make_icon.py OUT.png\n")
-        return 2
-    out = argv[1]
-    parent = os.path.dirname(out)
-    if parent:
-        os.makedirs(parent, exist_ok=True)
-    write_png(out, OUT_SIZE, render(OUT_SIZE))
-    return 0
+    args = argv[1:]
+    if len(args) == 3 and args[0] == "--bmp":
+        try:
+            size = int(args[1])
+        except ValueError:
+            size = 0
+        if size <= 0:
+            sys.stderr.write("make_icon.py: --bmp SIZE must be a positive int\n")
+            return 2
+        out = args[2]
+        parent = os.path.dirname(out)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
+        write_bmp(out, size, render(size))
+        return 0
+    if len(args) == 1:
+        out = args[0]
+        parent = os.path.dirname(out)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
+        write_png(out, OUT_SIZE, render(OUT_SIZE))
+        return 0
+    sys.stderr.write("usage: make_icon.py OUT.png\n"
+                     "       make_icon.py --bmp SIZE OUT.bmp\n")
+    return 2
 
 
 if __name__ == "__main__":

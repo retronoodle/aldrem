@@ -25,6 +25,15 @@
 #define UI_FONT_BASE 19.0f
 #define APP_DISPLAY_NAME "Aldrem"
 
+/* The window icon is a BMP baked into the binary by the Makefile (objcopy of
+ * build/icon-256.bmp, rendered from packaging/aldrem.svg). SDL_LoadBMP reads
+ * BMP only, which keeps SDL_image out of the dependency list. Defined only on
+ * platforms where the Makefile embeds it (not macOS, which uses the bundle). */
+#ifdef HAVE_EMBED_ICON
+extern const unsigned char aldrem_icon_start[];
+extern const unsigned char aldrem_icon_end[];
+#endif
+
 /* Supplied by the Makefile from `git describe`; a bare compiler invocation
  * (or a checkout with no tags) still builds. */
 #ifndef APP_VERSION
@@ -504,6 +513,23 @@ main(int argc, char **argv)
         SDL_Quit();
         return 1;
     }
+
+    /* Set the window icon from the bundled BMP so the title bar and task
+     * switcher show the app icon even when it is run outside a desktop
+     * entry (e.g. `make run`). Failure is non-fatal: the UI is unaffected. */
+#ifdef HAVE_EMBED_ICON
+    SDL_RWops *icon_rw = SDL_RWFromConstMem(aldrem_icon_start,
+        (int)(aldrem_icon_end - aldrem_icon_start));
+    if (icon_rw) {
+        SDL_Surface *icon = SDL_LoadBMP_RW(icon_rw, 1);
+        if (icon) {
+            SDL_SetWindowIcon(win, icon);
+            SDL_FreeSurface(icon);
+        } else {
+            SDL_Log("icon load failed: %s", SDL_GetError());
+        }
+    }
+#endif
 
     SDL_Renderer *ren = SDL_CreateRenderer(win, -1,
         SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC);
