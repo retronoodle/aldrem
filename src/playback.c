@@ -17,6 +17,7 @@
 #include "playback.h"
 #include "track.h"
 
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -24,6 +25,7 @@
 #define RB_FRAMES       (1 << 17) /* ≈2.97 s at 44.1 kHz, 1 MiB stereo float */
 #define SCRATCH_BYTES   (64 * 1024)
 #define FEED_SECONDS    0.5
+#define LEVEL_SCALE     65536.0f  /* fixed-point scale for meter levels */
 
 struct Playback {
     int inited;
@@ -55,6 +57,12 @@ struct Playback {
     SDL_atomic_t decoder_done;
     SDL_atomic_t eof;
     SDL_atomic_t quit_thread;
+
+    /* Per-channel meter levels, written by the callback (LEVEL_SCALE fixed). */
+    SDL_atomic_t lvl_peak_l;
+    SDL_atomic_t lvl_peak_r;
+    SDL_atomic_t lvl_rms_l;
+    SDL_atomic_t lvl_rms_r;
 
     float *ring;               /* RB_FRAMES frames, have.channels interleaved */
     SDL_atomic_t rb_write;     /* monotonic frame counters */
@@ -95,6 +103,27 @@ current_position(struct Playback *p)
         + (double)SDL_AtomicGet(&p->frames_played) / (double)p->have.freq;
 }
 
+/* Meter levels travel through SDL_atomic_t as fixed-point ints so the callback
+ * never needs a lock. Values above full scale are clamped to keep ints sane. */
+static int
+level_to_fixed(float v)
+{
+    if (v < 0.0f)
+        v = 0.0f;
+    if (v > 4.0f)
+        v = 4.0f;
+    return (int)(v * LEVEL_SCALE + 0.5f);
+}
+
+static void
+level_clear(struct Playback *p)
+{
+    SDL_AtomicSet(&p->lvl_peak_l, 0);
+    SDL_AtomicSet(&p->lvl_peak_r, 0);
+    SDL_AtomicSet(&p->lvl_rms_l, 0);
+    SDL_AtomicSet(&p->lvl_rms_r, 0);
+}
+
 static void SDLCALL
 audio_callback(void *userdata, Uint8 *stream, int len)
 {
@@ -110,8 +139,10 @@ audio_callback(void *userdata, Uint8 *stream, int len)
     /* Silence first: underruns and the paused/stopped states output zeros. */
     memset(stream, 0, (size_t)len);
 
-    if (SDL_AtomicGet(&p->state) != MP_PLAYING || out_frames <= 0)
+    if (SDL_AtomicGet(&p->state) != MP_PLAYING || out_frames <= 0) {
+        level_clear(p);
         return;
+    }
 
     w = SDL_AtomicGet(&p->rb_write);
     SDL_MemoryBarrierAcquireFunction();
@@ -146,8 +177,30 @@ audio_callback(void *userdata, Uint8 *stream, int len)
                 dst[i] *= scale;
         }
 
+        /* Meter the post-volume output. Mono is duplicated into both sides. */
+        {
+            float pk[2] = { 0.0f, 0.0f }, sq[2] = { 0.0f, 0.0f };
+            int f;
+            for (f = 0; f < n; ++f) {
+                int c;
+                for (c = 0; c < 2; ++c) {
+                    const float s = dst[f * ch + (ch > 1 ? c : 0)];
+                    const float a = s < 0.0f ? -s : s;
+                    if (a > pk[c])
+                        pk[c] = a;
+                    sq[c] += s * s;
+                }
+            }
+            SDL_AtomicSet(&p->lvl_peak_l, level_to_fixed(pk[0]));
+            SDL_AtomicSet(&p->lvl_peak_r, level_to_fixed(pk[1]));
+            SDL_AtomicSet(&p->lvl_rms_l, level_to_fixed((float)sqrt(sq[0] / (float)n)));
+            SDL_AtomicSet(&p->lvl_rms_r, level_to_fixed((float)sqrt(sq[1] / (float)n)));
+        }
+
         /* 32-bit counter: wraps after ~13 h at 44.1 kHz. Accepted for v1. */
         SDL_AtomicAdd(&p->frames_played, n);
+    } else {
+        level_clear(p);
     }
 
     /* Only the UI thread performs the STOPPED transition; the callback just
@@ -623,6 +676,15 @@ playback_get_status(PlaybackStatus *out)
     out->state = (PlaybackState)SDL_AtomicGet(&g.state);
     out->position = current_position(&g);
     out->volume_percent = g.volume_percent;
+
+    /* A paused device stops calling the callback, so stale levels would freeze
+     * on screen. Report silence unless audio is actually flowing. */
+    if (out->state == MP_PLAYING) {
+        out->level_peak_l = (float)SDL_AtomicGet(&g.lvl_peak_l) / LEVEL_SCALE;
+        out->level_peak_r = (float)SDL_AtomicGet(&g.lvl_peak_r) / LEVEL_SCALE;
+        out->level_rms_l = (float)SDL_AtomicGet(&g.lvl_rms_l) / LEVEL_SCALE;
+        out->level_rms_r = (float)SDL_AtomicGet(&g.lvl_rms_r) / LEVEL_SCALE;
+    }
 
     /* g.info is written only on this thread (playback_load). */
     out->bits_per_sample = g.info.bits_per_sample;

@@ -16,5 +16,7 @@ Thumbs.db
 # Kilo local config/plans
 .kilo/
 
-# Built test binary
+# Built test binaries
 tests/test_load
+tests/test_vu
+tests/test_settings

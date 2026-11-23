@@ -57,6 +57,8 @@ Format detection works by extension, with magic-byte sniffing as a fallback — 
 | Double-click    | Play that row immediately  |
 | Prev / Next     | Previous / next entry      |
 
+The top-right meter shows stereo output levels as twin needles or LED bars. Click its `Needle` / `LED` chip to switch; the choice is saved to `$XDG_CONFIG_HOME/aldrem/settings.ini` (falling back to `~/.config/aldrem/`).
+
 The progress and volume sliders are live: seek mid-track, adjust volume, and it takes effect immediately. Keys are global except while a dialog or the file browser is open, so typing a path works.
 
 ## Playlists
@@ -110,6 +112,8 @@ On macOS, `make app` wraps the binary into a proper `aldrem.app` bundle with an 
 main.c            SDL window, event loop, Nuklear UI, global shortcuts
 playback.c        audio device, decoder thread, ring buffer, volume, seeking
 playlist.c        queue model, .m3u read/write, autosave, auto-advance
+vu.c              level-meter maths: dB mapping, needle and peak ballistics
+settings.c        persisted preferences (meter style) in settings.ini
 track.c           format detection + dispatch to the right decoder
 track_*.c         one small implementation per format
 file_browser.c    minimal in-app directory browser

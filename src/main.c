@@ -19,6 +19,7 @@
 #include "file_browser.h"
 #include "playback.h"
 #include "playlist.h"
+#include "settings.h"
 #include "theme.h"
 #include "track.h"
 
@@ -396,6 +397,7 @@ ui_playlist_panel(Playlist *pl, struct nk_context *ctx, float scale,
 enum {
     UI_TAB_NONE = 0,
     UI_TAB_OPEN = 1,
+    UI_TAB_VU,
     UI_TAB_PREV,
     UI_TAB_PLAY,
     UI_TAB_STOP,
@@ -412,12 +414,69 @@ struct UiButtons {
      * "survives a frame" rule. */
     struct MpSeekAnim seek;
     struct MpVolAnim vol;
+    /* Meter style toggle and the meter's needle/peak ballistics. */
+    struct MpAnim vu;
+    struct MpVuAnim meter;
     struct MpButtonOpts opt; /* focus slot and dt, refilled each frame */
     /* The focused slot; UI_TAB_NONE = nobody. Tab is the only focus key the
      * app consumes: Enter is left to Nuklear so edit fields and popups keep
      * theirs, which also keeps its keyboard counters at one tick per press. */
     int focus;
 };
+
+/* Level meter pinned to the top-right corner of the frame. It is its own
+ * window so it ignores the centred column; the header row reserves the same
+ * width on its right (UI_VU_RESERVE) so the status text stops short of it. */
+#define UI_VU_W        240.0f /* meter plus toggle, logical px */
+#define UI_VU_METER_W 160.0f
+#define UI_VU_H        46.0f  /* matches the header row it sits in */
+#define UI_VU_MARGIN   16.0f
+#define UI_VU_RESERVE (UI_VU_W + UI_VU_MARGIN)
+
+static void
+ui_vu_overlay(struct nk_context *ctx, float scale, struct MpTheme *th,
+    float frame_w, float top_y, MeterStyle *style, struct UiButtons *ub,
+    const PlaybackStatus *st, int enabled)
+{
+    float w = mp_s(UI_VU_W, scale), h = mp_s(UI_VU_H, scale);
+    float margin = mp_s(UI_VU_MARGIN, scale);
+    struct nk_rect r = nk_rect(frame_w - w - margin, top_y, w, h);
+    struct MpVuLevels lv;
+    int needle = *style == METER_NEEDLE;
+
+    lv.peak_l = st->level_peak_l;
+    lv.peak_r = st->level_peak_r;
+    lv.rms_l = st->level_rms_l;
+    lv.rms_r = st->level_rms_r;
+
+    /* Transparent, unpadded window: only the meter and toggle show. Pushes
+     * are popped after nk_end whether or not the window opened. */
+    nk_style_push_style_item(ctx, &ctx->style.window.fixed_background,
+                             nk_style_item_color(nk_rgba(0, 0, 0, 0)));
+    nk_style_push_vec2(ctx, &ctx->style.window.padding, nk_vec2(0.0f, 0.0f));
+    nk_style_push_vec2(ctx, &ctx->style.window.spacing, nk_vec2(0.0f, 0.0f));
+
+    if (nk_begin(ctx, "vu", r, NK_WINDOW_NO_SCROLLBAR)) {
+        nk_layout_row_template_begin(ctx, h);
+        nk_layout_row_template_push_static(ctx, mp_s(UI_VU_METER_W, scale));
+        nk_layout_row_template_push_dynamic(ctx);
+        nk_layout_row_template_end(ctx);
+
+        mp_vu_meter(ctx, scale, th, needle, &lv, ub->opt.dt, &ub->meter);
+        if (mp_button(ctx, scale, th, needle ? "Needle" : "LED",
+                      MP_BTN_NEUTRAL, MP_ICON_PLAY, UI_TAB_VU, enabled,
+                      &ub->vu, &ub->opt)) {
+            *style = needle ? METER_LED : METER_NEEDLE;
+            if (settings_set_meter_style(*style) != 0)
+                SDL_Log("settings: cannot save meter style");
+        }
+    }
+    nk_end(ctx);
+
+    nk_style_pop_vec2(ctx);
+    nk_style_pop_vec2(ctx);
+    nk_style_pop_style_item(ctx);
+}
 
 /* Time, seek, transport and volume, gathered inside the dock panel. Returns 1
  * when the seek bar was released, with the target (seconds) in `*seek_out`;
@@ -652,6 +711,7 @@ main(int argc, char **argv)
     struct MpTheme theme;
 
     mp_theme_init(&theme, ren);
+    MeterStyle meter_style = settings_meter_style();
     nk_style_default(ctx);
     mp_theme_apply(ctx, ui_scale, &theme);
     ui_select_font(ctx, ratio, font_1x, font_2x);
@@ -952,6 +1012,8 @@ main(int argc, char **argv)
          * dialogs drawn inside keep their surface. */
         nk_style_push_style_item(ctx, &ctx->style.window.fixed_background,
                                  nk_style_item_hide());
+        float header_y = 0.0f;
+
         if (nk_begin(ctx, "aldrem",
                      nk_rect(0, 0, (float)px_w, (float)px_h),
                      NK_WINDOW_NO_SCROLLBAR))
@@ -961,10 +1023,14 @@ main(int argc, char **argv)
             struct nk_rect col = ui_column(nk_window_get_content_region(ctx),
                                            ui_scale);
 
-            /* header: Open button + status; inert while a dialog is up */
-            nk_layout_row_template_begin(ctx, mp_s(34.0f, ui_scale));
+            /* header: Open button + status; inert while a dialog is up. The
+             * right cell is left blank for the level meter overlay. */
+            header_y = nk_window_get_content_region(ctx).y;
+            nk_layout_row_template_begin(ctx, mp_s(UI_VU_H, ui_scale));
             nk_layout_row_template_push_static(ctx, mp_s(90.0f, ui_scale));
             nk_layout_row_template_push_dynamic(ctx);
+            nk_layout_row_template_push_static(ctx,
+                                               mp_s(UI_VU_RESERVE, ui_scale));
             nk_layout_row_template_end(ctx);
             if (mp_button(ctx, ui_scale, &theme, "Open", MP_BTN_PRIMARY,
                           MP_ICON_PLAY, UI_TAB_OPEN,
@@ -1010,6 +1076,11 @@ main(int argc, char **argv)
         }
         nk_end(ctx);
         nk_style_pop_style_item(ctx);
+
+        /* Meter overlay sits above the main window, pinned to the frame's top
+         * right. It stays live while a dialog is up; only its toggle is gated. */
+        ui_vu_overlay(ctx, ui_scale, &theme, (float)px_w, header_y,
+                      &meter_style, &buttons, &st, !modal_active);
 
         /* Toolbar consequences run after the main window closes so dialogs are
          * never opened from inside another window's draw. */

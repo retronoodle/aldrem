@@ -11,6 +11,7 @@
 #include <SDL.h>
 
 #include "nuklear_config.h"
+#include "vu.h"
 
 struct MpTheme {
     /* Renderer pixels per logical point. Copied so mp_theme_apply can scale. */
@@ -39,6 +40,7 @@ struct MpTheme {
     struct nk_color success;
     struct nk_color danger;
     struct nk_color danger_surface;
+    struct nk_color amber;
     struct nk_color shadow;
 
     /* Generated once in mp_theme_init at a fixed source size and scaled to the
@@ -157,6 +159,24 @@ int mp_seek_bar(struct nk_context *ctx, float scale, const struct MpTheme *th,
 int mp_volume_slider(struct nk_context *ctx, float scale,
                      const struct MpTheme *th, float *value, int enabled,
                      float dt, struct MpVolAnim *anim);
+
+/* Stereo level meter, in two styles: twin needle dials, or LED bars. Output
+ * levels are linear and post-volume (see playback.h). Ballistics live in the
+ * caller-owned MpVuAnim, held across frames like the other widget states. */
+struct MpVuLevels {
+    float peak_l, peak_r;
+    float rms_l, rms_r;
+};
+
+struct MpVuAnim {
+    VuBallistics l, r;
+};
+
+/* Lays out and draws the meter in the current row, then advances its
+ * ballistics by dt. `needle` 1 draws the dials side by side; 0 stacks the LED
+ * bars, left channel above right. */
+void mp_vu_meter(struct nk_context *ctx, float scale, const struct MpTheme *th,
+    int needle, const struct MpVuLevels *lv, float dt, struct MpVuAnim *anim);
 
 /* Dock panel. mp_dock_begin lays out one dock-height row spanning `col`, draws
  * the shadow, fill, border and top highlight, then opens a grouped layout for
