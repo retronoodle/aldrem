@@ -28,8 +28,8 @@ int  file_browser_is_open(const FileBrowser *fb);
 
 /* 1 = file chosen (absolute path written to out, fb closed),
  * -1 = cancelled/closed, 0 = still open. Call only while is_open.
- * theme may be NULL, which keeps the stock footer buttons; a theme draws the
- * footer with the shared button helper (Phase 6 passes it). dt is the frame
+ * theme may be NULL, which keeps the stock widgets; a theme draws the window
+ * with the shared button, row and error helpers. dt is the frame
  * time in seconds for the footer's hover and press easing. */
 int  file_browser_draw(FileBrowser *fb, struct nk_context *ctx, float scale,
                        struct MpTheme *theme, float dt, float screen_w,

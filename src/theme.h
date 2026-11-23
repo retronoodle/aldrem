@@ -180,6 +180,12 @@ void mp_time_label(struct nk_context *ctx, const struct MpTheme *th,
 void mp_label_muted(struct nk_context *ctx, const struct MpTheme *th,
     const char *text, nk_flags align);
 
+/* One file-browser row, returning 1 on click (nk_select_label's contract, so
+ * the caller keeps owning the selection). `selected` draws the accent bar and
+ * fill; `is_dir` draws the name in the accent colour. */
+int mp_list_row(struct nk_context *ctx, float scale, const struct MpTheme *th,
+    const char *text, int is_dir, int selected);
+
 /* Empty-playlist illustration: a disc, a headline and a chip row. The caller
  * sets a one-row layout at the band height first. */
 void mp_empty_state(struct nk_context *ctx, float scale, const struct MpTheme *th,

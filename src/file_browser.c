@@ -353,7 +353,9 @@ file_browser_draw(FileBrowser *fb, struct nk_context *ctx, float scale,
     loading = fb->scan_dir != NULL;
 
     row_h = fb_s(28.0f, scale);
-    footer_h = fb_s(30.0f, scale);
+    /* Themed buttons are taller than the stock footer, so size to them. */
+    footer_h = theme ? fb_s(mp_button_height(MP_BTN_PRIMARY), scale)
+                     : fb_s(30.0f, scale);
     spacing = fb_s(4.0f, scale);
     margin = fb_s(40.0f, scale);
     w = fb_s(560.0f, scale);
@@ -379,10 +381,27 @@ file_browser_draw(FileBrowser *fb, struct nk_context *ctx, float scale,
         int i;
 
         nk_layout_row_dynamic(ctx, row_h, 1);
-        if (fb->error[0])
-            nk_label(ctx, fb->error, NK_TEXT_LEFT);
-        else
+        if (fb->error[0]) {
+            if (theme)
+                mp_error_panel(ctx, scale, theme, fb->error);
+            else
+                nk_label(ctx, fb->error, NK_TEXT_LEFT);
+        } else if (theme) {
+            mp_label_muted(ctx, theme, loading ? fb->scan_path : fb->dir,
+                           NK_TEXT_LEFT);
+        } else {
             nk_label(ctx, loading ? fb->scan_path : fb->dir, NK_TEXT_LEFT);
+        }
+
+        /* Hairline under the path header, in the theme's strong border. */
+        if (theme) {
+            struct nk_rect hdr = nk_window_get_content_region(ctx);
+            float y = hdr.y + row_h + spacing * 0.5f;
+
+            nk_stroke_line(nk_window_get_canvas(ctx), hdr.x, y,
+                           hdr.x + hdr.w, y, fb_s(1.0f, scale),
+                           theme->border_strong);
+        }
 
         list_h = nk_window_get_content_region(ctx).h
             - row_h - footer_h - 3.0f * spacing;
@@ -404,8 +423,13 @@ file_browser_draw(FileBrowser *fb, struct nk_context *ctx, float scale,
 
                 /* Nonzero return means clicked; the value is only a render
                  * flag, so the borrowed truth is fb->selected. */
-                if (nk_select_label(ctx, text, NK_TEXT_LEFT,
-                                    i == fb->selected)) {
+                int clicked = theme
+                    ? mp_list_row(ctx, scale, theme, text,
+                                  fb->entries[i].is_dir, i == fb->selected)
+                    : nk_select_label(ctx, text, NK_TEXT_LEFT,
+                                      i == fb->selected);
+
+                if (clicked) {
                     Uint32 now = SDL_GetTicks();
 
                     if (fb->last_click == i &&
@@ -428,9 +452,8 @@ file_browser_draw(FileBrowser *fb, struct nk_context *ctx, float scale,
 
         nk_layout_row_dynamic(ctx, footer_h, 2);
         if (theme) {
-            /* Themed footer: Open is primary, Cancel neutral. The theme is
-             * NULL until Phase 6 wires it, so stock buttons stay the default.
-             * dt is the caller's frame time: the easing needs it to move. */
+            /* Themed footer: Open is primary, Cancel neutral. dt is the
+             * caller's frame time: the easing needs it to move. */
             struct MpButtonOpts opt;
 
             opt.focus_slot = 0;

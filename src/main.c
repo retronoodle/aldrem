@@ -1005,7 +1005,7 @@ main(int argc, char **argv)
         if (browser_open && browser) {
             char chosen[4096];
 
-            if (file_browser_draw(browser, ctx, ui_scale, NULL,
+            if (file_browser_draw(browser, ctx, ui_scale, &theme,
                                   buttons.opt.dt, (float)px_w, (float)px_h,
                                   chosen, sizeof chosen) == 1) {
                 if (browser_list_mode) {
