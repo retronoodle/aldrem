@@ -52,6 +52,23 @@ struct FileBrowser {
     FbEntry *staging;
 };
 
+/* sprintf-aware compilers cannot bound the result of "%s/%s" into a fixed
+ * buffer even when the inputs are shorter, so build it by hand and refuse
+ * rather than silently truncate. */
+static int
+fb_join_path(char *out, size_t outlen, const char *dir, const char *name)
+{
+    size_t dl = strlen(dir);
+    size_t nl = strlen(name);
+
+    if (dl + 1 + nl + 1 > outlen)
+        return -1;
+    memcpy(out, dir, dl);
+    out[dl] = '/';
+    memcpy(out + dl + 1, name, nl + 1);
+    return 0;
+}
+
 static int
 fb_name_cmp_ci(const char *a, const char *b)
 {
@@ -186,7 +203,8 @@ fb_advance_scan(FileBrowser *fb)
         }
         if (de->d_name[0] == '.')
             continue;
-        snprintf(joined, sizeof joined, "%s/%s", fb->scan_path, de->d_name);
+        if (fb_join_path(joined, sizeof joined, fb->scan_path, de->d_name) != 0)
+            continue;
         if (stat(joined, &sb) != 0)
             continue;
 
@@ -418,9 +436,10 @@ file_browser_draw(FileBrowser *fb, struct nk_context *ctx, float scale,
     if (chosen >= 0 && chosen < fb->count) {
         char joined[FB_PATH_MAX];
 
-        snprintf(joined, sizeof joined, "%s/%s",
-                 fb->dir, fb->entries[chosen].name);
-        if (fb->entries[chosen].is_dir) {
+        if (fb_join_path(joined, sizeof joined, fb->dir,
+                         fb->entries[chosen].name) != 0) {
+            result = -1;
+        } else if (fb->entries[chosen].is_dir) {
             fb_begin_scan(fb, joined);
         } else {
             snprintf(out, outlen, "%s", joined);

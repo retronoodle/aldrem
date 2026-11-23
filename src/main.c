@@ -25,6 +25,12 @@
 #define UI_FONT_BASE 19.0f
 #define APP_DISPLAY_NAME "Aldrem"
 
+/* Supplied by the Makefile from `git describe`; a bare compiler invocation
+ * (or a checkout with no tags) still builds. */
+#ifndef APP_VERSION
+#define APP_VERSION "dev"
+#endif
+
 /* SDL_HINT_APP_NAME is newer than some SDL2 builds; the literal value is
  * stable, so fall back to it rather than failing to compile. */
 #ifndef SDL_HINT_APP_NAME
@@ -469,6 +475,14 @@ ui_save_modal(struct nk_context *ctx, float scale, float screen_w,
 int
 main(int argc, char **argv)
 {
+    /* Answer --version before touching SDL: it needs no window, no audio and
+     * no display, so it works in a bare CI container. */
+    if (argc > 1 && (strcmp(argv[1], "--version") == 0 ||
+                     strcmp(argv[1], "-V") == 0)) {
+        printf("%s %s\n", "aldrem", APP_VERSION); /* matches packaging/TARGET */
+        return 0;
+    }
+
     /* Name the app for volume mixers and screensaver inhibitors. Set before
      * the first SDL_Init so the audio backend picks it up on device open. */
     SDL_SetHint(SDL_HINT_APP_NAME, APP_DISPLAY_NAME);
@@ -493,6 +507,11 @@ main(int argc, char **argv)
 
     SDL_Renderer *ren = SDL_CreateRenderer(win, -1,
         SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC);
+    if (!ren)
+        /* Headless CI (SDL_VIDEODRIVER=dummy) and machines without a GL
+         * driver have no accelerated renderer; the software one still runs
+         * the full event loop. */
+        ren = SDL_CreateRenderer(win, -1, SDL_RENDERER_SOFTWARE);
     if (!ren) {
         SDL_Log("SDL_CreateRenderer failed: %s", SDL_GetError());
         SDL_DestroyWindow(win);
