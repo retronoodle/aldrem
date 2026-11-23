@@ -51,6 +51,7 @@ Useful targets: `make run`, `make install` (`PREFIX=...` to relocate), `make app
 | `src/track.c` | format detection (extension + magic bytes) and dispatch |
 | `src/track_*.c` | one decoder per format |
 | `src/file_browser.c` | minimal in-app directory browser |
+| `src/finder.c` | recursive audio search, sliced per frame; pure, no SDL |
 | `src/track.h` / `src/track_internal.h` | public track API and the `TrackOps` contract |
 | `vendor/` | Nuklear, minimp3, dr_flac, stb_vorbis |
 

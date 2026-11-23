@@ -17,6 +17,7 @@
 #include "nuklear_sdl_renderer.h"
 
 #include "file_browser.h"
+#include "finder.h"
 #include "playback.h"
 #include "playlist.h"
 #include "settings.h"
@@ -212,7 +213,8 @@ ui_save_path_default(char *out, size_t outlen)
 enum {
     PL_ACTION_NONE      = 0,
     PL_ACTION_OPEN_LIST = 1 << 0,
-    PL_ACTION_SAVE_AS   = 1 << 1
+    PL_ACTION_SAVE_AS   = 1 << 1,
+    PL_ACTION_FIND      = 1 << 2
 };
 
 /* The content column inside the root window: 720 pt wide at most, centred,
@@ -264,7 +266,7 @@ ui_list_height(struct nk_context *ctx, float scale, float row_h)
 
 static int
 ui_playlist_panel(Playlist *pl, struct nk_context *ctx, float scale,
-    int disabled, const struct MpTheme *th, int has_track)
+    int disabled, int find_ok, const struct MpTheme *th, int has_track)
 {
     char header[64];
     float row_h = mp_s(PL_ROW_H, scale);
@@ -285,11 +287,17 @@ ui_playlist_panel(Playlist *pl, struct nk_context *ctx, float scale,
     nk_layout_row_dynamic(ctx, bar_h, 1);
     nk_label(ctx, header, NK_TEXT_LEFT);
 
-    nk_layout_row_dynamic(ctx, bar_h, 4);
+    nk_layout_row_dynamic(ctx, bar_h, 5);
     if (disabled)
         nk_widget_disable_begin(ctx);
     if (nk_button_label(ctx, "Open list"))
         actions |= PL_ACTION_OPEN_LIST;
+    if (!disabled && !find_ok)
+        nk_widget_disable_begin(ctx);
+    if (nk_button_label(ctx, "Find audio"))
+        actions |= PL_ACTION_FIND;
+    if (!disabled && !find_ok)
+        nk_widget_disable_end(ctx);
     if (nk_button_label(ctx, "Save as"))
         actions |= PL_ACTION_SAVE_AS;
     if (disabled)
@@ -613,6 +621,215 @@ ui_save_modal(struct nk_context *ctx, float scale, float screen_w,
     return keep;
 }
 
+/* Adds every checked row, or every row when all is set, in one batch. */
+static void
+ui_finder_add(Playlist *pl, const Finder *fd, const unsigned char *checked,
+    int all, char *msg, size_t msglen)
+{
+    const char **paths;
+    int i, n = 0, added, full = 0, count = finder_count(fd);
+
+    for (i = 0; i < count; i++) {
+        if (all || checked[i])
+            n++;
+    }
+    if (n == 0) {
+        snprintf(msg, msglen, "Nothing selected.");
+        return;
+    }
+    paths = (const char **)malloc(sizeof *paths * (size_t)n);
+    if (!paths) {
+        snprintf(msg, msglen, "Out of memory.");
+        return;
+    }
+    for (i = 0, n = 0; i < count; i++) {
+        if (all || checked[i])
+            paths[n++] = finder_path_at(fd, i);
+    }
+    added = playlist_add_many(pl, paths, n, &full);
+    free((void *)paths);
+    if (full > 0)
+        snprintf(msg, msglen, "Added %d new track%s; %d skipped, list is full.",
+                 added, added == 1 ? "" : "s", full);
+    else
+        snprintf(msg, msglen, "Added %d new track%s.", added,
+                 added == 1 ? "" : "s");
+}
+
+/* Expands a leading "~" or "~/" to $HOME in place, so the shorthand works in
+ * the folder field. Other paths are left alone. */
+static void
+ui_expand_home(char *path, size_t len)
+{
+    const char *home = getenv("HOME");
+    char tmp[4096];
+    int n;
+
+    if (path[0] != '~' || (path[1] != '/' && path[1] != '\0') ||
+        !home || !home[0])
+        return;
+    n = snprintf(tmp, sizeof tmp, "%s%s", home, path + 1);
+    if (n < 0 || (size_t)n >= sizeof tmp || (size_t)n >= len)
+        return;
+    memcpy(path, tmp, (size_t)n + 1);
+}
+
+/* Row text for a found file: the file name first, so it survives clipping at
+ * the right edge, then its folder. */
+static void
+ui_finder_row_label(const char *path, char *out, size_t outlen)
+{
+    const char *slash = strrchr(path, '/');
+    int dir_len;
+
+    if (!slash) {
+        snprintf(out, outlen, "%s", path);
+        return;
+    }
+    dir_len = slash == path ? 1 : (int)(slash - path);
+    snprintf(out, outlen, "%s   %.*s", slash + 1, dir_len, path);
+}
+
+/* Find-audio dialog. Returns 1 while it should stay open. The walk runs in
+ * slices from the frame loop. Rows can be ticked only once it has finished, so
+ * the sorted order cannot shift under the checkboxes. */
+static int
+ui_finder_modal(struct nk_context *ctx, float scale, float screen_w,
+    float screen_h, Finder *fd, Playlist *pl, char *root, size_t rootlen,
+    unsigned char *checked, int *focus, char *msg, size_t msglen)
+{
+    struct nk_rect bounds;
+    float margin = mp_s(40.0f, scale);
+    float w = mp_s(640.0f, scale);
+    float h = mp_s(480.0f, scale);
+    float row_h = mp_s(28.0f, scale);
+    float bar_h = mp_s(28.0f, scale);
+    int running, count;
+    int keep = 1;
+
+    if (w > screen_w - 2.0f * margin)
+        w = screen_w - 2.0f * margin;
+    if (h > screen_h - 2.0f * margin)
+        h = screen_h - 2.0f * margin;
+    if (w < 1.0f)
+        w = screen_w;
+    if (h < 1.0f)
+        h = screen_h;
+    bounds = nk_rect(lroundf((screen_w - w) * 0.5f),
+                     lroundf((screen_h - h) * 0.5f),
+                     lroundf(w), lroundf(h));
+
+    if (nk_begin(ctx, "Find audio", bounds,
+                 NK_WINDOW_BORDER | NK_WINDOW_TITLE | NK_WINDOW_NO_SCROLLBAR)) {
+        nk_flags evt;
+        int do_search = 0;
+        char status[160];
+
+        nk_layout_row_dynamic(ctx, row_h, 1);
+        nk_label(ctx, "Folder to search (type / for the whole machine):",
+                 NK_TEXT_LEFT);
+
+        if (*focus) {
+            nk_edit_focus(ctx, 0);
+            *focus = 0;
+        }
+        nk_layout_row_dynamic(ctx, row_h, 1);
+        evt = nk_edit_string_zero_terminated(ctx,
+            NK_EDIT_FIELD | NK_EDIT_SIG_ENTER, root, (int)rootlen,
+            nk_filter_default);
+        if (evt & NK_EDIT_COMMITED)
+            do_search = 1;
+
+        running = finder_running(fd);
+        nk_layout_row_dynamic(ctx, bar_h, 2);
+        if (running) {
+            if (nk_button_label(ctx, "Stop"))
+                finder_cancel(fd);
+        } else if (nk_button_label(ctx, "Search")) {
+            do_search = 1;
+        }
+        if (nk_button_label(ctx, "Close"))
+            keep = 0;
+
+        if (do_search && !running) {
+            memset(checked, 0, FINDER_MAX_RESULT);
+            ui_expand_home(root, rootlen);
+            if (finder_start(fd, root, track_ext_supported) != 0)
+                snprintf(msg, msglen, "Cannot open that folder.");
+            else
+                msg[0] = '\0';
+        }
+        running = finder_running(fd);
+        count = finder_count(fd);
+
+        if (running)
+            snprintf(status, sizeof status, "Searching... %d found", count);
+        else if (count == 0)
+            snprintf(status, sizeof status, "No audio files found yet.");
+        else if (finder_truncated(fd))
+            snprintf(status, sizeof status,
+                     "%d audio files found (list capped at %d)",
+                     count, FINDER_MAX_RESULT);
+        else if (finder_out_of_memory(fd))
+            snprintf(status, sizeof status,
+                     "%d audio files found (out of memory; list incomplete)",
+                     count);
+        else
+            snprintf(status, sizeof status, "%d audio file%s found",
+                     count, count == 1 ? "" : "s");
+        nk_layout_row_dynamic(ctx, row_h, 1);
+        nk_label(ctx, status, NK_TEXT_LEFT);
+        if (msg[0]) {
+            nk_layout_row_dynamic(ctx, row_h, 1);
+            nk_label(ctx, msg, NK_TEXT_LEFT);
+        }
+
+        nk_layout_row_dynamic(ctx, bar_h, 4);
+        if (running || count == 0)
+            nk_widget_disable_begin(ctx);
+        if (nk_button_label(ctx, "Select all"))
+            memset(checked, 1, (size_t)count);
+        if (nk_button_label(ctx, "Select none"))
+            memset(checked, 0, (size_t)count);
+        if (nk_button_label(ctx, "Add selected"))
+            ui_finder_add(pl, fd, checked, 0, msg, msglen);
+        if (nk_button_label(ctx, "Add all"))
+            ui_finder_add(pl, fd, checked, 1, msg, msglen);
+        if (running || count == 0)
+            nk_widget_disable_end(ctx);
+
+        if (count > 0) {
+            struct nk_list_view view;
+            float list_h = ui_list_height(ctx, scale, row_h);
+
+            nk_layout_row_dynamic(ctx, list_h, 1);
+            if (running)
+                nk_widget_disable_begin(ctx);
+            if (nk_list_view_begin(ctx, &view, "found", NK_WINDOW_BORDER,
+                                   (int)row_h, count)) {
+                int i;
+
+                char label[4200];
+
+                nk_layout_row_dynamic(ctx, row_h, 1);
+                for (i = view.begin; i < view.end; i++) {
+                    nk_bool on = checked[i] ? nk_true : nk_false;
+
+                    ui_finder_row_label(finder_path_at(fd, i), label,
+                                        sizeof label);
+                    nk_checkbox_label(ctx, label, &on);
+                    checked[i] = on ? 1 : 0;
+                }
+                nk_list_view_end(&view);
+            }
+            if (running)
+                nk_widget_disable_end(ctx);
+        }
+    }
+    nk_end(ctx);
+    return keep;
+}
+
 int
 main(int argc, char **argv)
 {
@@ -728,6 +945,10 @@ main(int argc, char **argv)
     if (!browser)
         SDL_Log("file browser allocation failed; Open is disabled");
 
+    Finder *finder = finder_create();
+    if (!finder)
+        SDL_Log("finder allocation failed; Find audio is disabled");
+
     /* Restores the autosaved queue (never plays) before anything is added. */
     Playlist *pl = playlist_create();
     if (!pl)
@@ -753,6 +974,11 @@ main(int argc, char **argv)
     int save_focus = 0;
     char save_path[4096] = "";
     char save_err[256] = "";
+    int finder_open = 0;
+    int finder_focus = 0;
+    char finder_root[4096] = "";
+    char finder_msg[256] = "";
+    unsigned char finder_checked[FINDER_MAX_RESULT];
 
     struct UiButtons buttons;
     memset(&buttons, 0, sizeof buttons);
@@ -782,7 +1008,8 @@ main(int argc, char **argv)
             int consumed = 0;
 
             /* Recomputed per event: Esc can close a modal mid-batch. */
-            modal_active = save_modal_open || file_browser_is_open(browser);
+            modal_active = save_modal_open || finder_open ||
+                file_browser_is_open(browser);
 
             /* A click is a pointer gesture, so it drops keyboard focus: the
              * ring should not linger on a button the mouse did not pick. */
@@ -805,6 +1032,10 @@ main(int argc, char **argv)
                  * the window. */
                 if (save_modal_open) {
                     save_modal_open = 0;
+                    SDL_StopTextInput();
+                } else if (finder_open) {
+                    finder_cancel(finder);
+                    finder_open = 0;
                     SDL_StopTextInput();
                 } else if (file_browser_is_open(browser))
                     file_browser_close(browser);
@@ -898,7 +1129,7 @@ main(int argc, char **argv)
         int dock_open;
 
         browser_open = file_browser_is_open(browser);
-        modal_active = save_modal_open || browser_open;
+        modal_active = save_modal_open || finder_open || browser_open;
 
         /* One dt per frame for the easing and the theme clock, clamped so a
          * stalled window (a drag, a resize) cannot jump an animation to its
@@ -1076,7 +1307,8 @@ main(int argc, char **argv)
                 mp_dock_end(ctx);
             nk_layout_row_dynamic(ctx, mp_s(4.0f, ui_scale), 1);
             panel_actions = ui_playlist_panel(pl, ctx, ui_scale, modal_active,
-                                              &theme, st.has_track);
+                                              finder != NULL, &theme,
+                                              st.has_track);
         }
         nk_end(ctx);
         nk_style_pop_style_item(ctx);
@@ -1098,6 +1330,18 @@ main(int argc, char **argv)
             save_err[0] = '\0';
             save_focus = 1;
             save_modal_open = 1;
+            SDL_StartTextInput();
+        }
+        if (panel_actions & PL_ACTION_FIND) {
+            const char *home = getenv("HOME");
+
+            /* Remember the last folder for the session; default to $HOME. */
+            if (finder_root[0] == '\0')
+                snprintf(finder_root, sizeof finder_root, "%s",
+                         home && home[0] ? home : "/");
+            finder_msg[0] = '\0';
+            finder_focus = 1;
+            finder_open = 1;
             SDL_StartTextInput();
         }
 
@@ -1133,6 +1377,21 @@ main(int argc, char **argv)
             }
         }
 
+        /* Find-audio scans a slice per frame, then draws over the main window
+         * like the other dialogs. Closing cancels the walk. */
+        if (finder_running(finder))
+            finder_step(finder, 256);
+        if (finder_open) {
+            if (!ui_finder_modal(ctx, ui_scale, (float)px_w, (float)px_h,
+                                 finder, pl, finder_root, sizeof finder_root,
+                                 finder_checked, &finder_focus,
+                                 finder_msg, sizeof finder_msg)) {
+                finder_cancel(finder);
+                finder_open = 0;
+                SDL_StopTextInput();
+            }
+        }
+
         mp_theme_backdrop(ren, px_w, px_h, &theme);
         nk_sdl_render(NK_ANTI_ALIASING_ON);
         SDL_RenderPresent(ren);
@@ -1145,6 +1404,7 @@ main(int argc, char **argv)
 
     /* Join the decoder thread and close the device before tearing down
      * SDL/Nuklear; otherwise macOS complains about an open audio device. */
+    finder_free(finder);
     file_browser_destroy(browser);
     playback_shutdown();
     nk_sdl_shutdown();

@@ -528,16 +528,14 @@ playlist_track_finished(Playlist *pl)
     /* End of the list, or nothing loadable: stay stopped, no wrap. */
 }
 
-int
-playlist_add(Playlist *pl, const char *path)
+/* Validates a path and resolves it to the absolute form stored in the list.
+ * Returns 1 with resolved filled in, 0 when rejected. Touches no list state. */
+static int
+pl_resolve(const char *path, char *resolved)
 {
-    PlaybackStatus st;
     struct stat sb;
-    char resolved[PL_PATH_MAX];
-    char *copy;
-    int idle, index;
 
-    if (!pl || !path || !path[0])
+    if (!path || !path[0])
         return 0;
     if (strlen(path) >= PL_PATH_MAX) {
         SDL_Log("playlist: path too long, skipped");
@@ -565,6 +563,21 @@ playlist_add(Playlist *pl, const char *path)
         SDL_Log("playlist: cannot resolve %s: %s", path, strerror(errno));
         return 0;
     }
+    return 1;
+}
+
+/* Validates and appends one path with no autosave or autoplay. Returns 0 when
+ * rejected, 1 when added (*out_index set), 2 when already listed (*out_index
+ * set). Callers decide persistence and playback. */
+static int
+pl_admit(Playlist *pl, const char *path, int *out_index)
+{
+    char resolved[PL_PATH_MAX];
+    char *copy;
+    int index;
+
+    if (!pl || !pl_resolve(path, resolved))
+        return 0;
 
     /* Already listed: never add it twice. An idle player still starts it, so a
      * CLI arg or drop of a known track keeps its autoplay. This runs before the
@@ -573,10 +586,8 @@ playlist_add(Playlist *pl, const char *path)
         const char *have = playlist_path_at(pl, index);
 
         if (have && strcmp(have, resolved) == 0) {
-            playback_get_status(&st);
-            if (st.state == MP_STOPPED)
-                playlist_play_index(pl, index);
-            return 1;
+            *out_index = index;
+            return 2;
         }
     }
 
@@ -585,22 +596,141 @@ playlist_add(Playlist *pl, const char *path)
         return 0;
     }
 
-    playback_get_status(&st);
-    idle = st.state == MP_STOPPED;
-
     copy = dup_string(resolved);
     if (!copy || paths_push(&pl->paths, &pl->count, &pl->cap, copy) != 0) {
         SDL_Log("playlist: out of memory");
         return 0;
     }
-    index = pl->count - 1;
-    playlist_autosave(pl);
+    *out_index = pl->count - 1;
+    return 1;
+}
+
+/* Open-addressing set of path strings, used only by a batch add so dedupe is
+ * one hash lookup per file instead of a scan of the whole list. Slots point at
+ * strings the playlist owns; the set never copies or frees them. */
+typedef struct {
+    const char **slots;
+    size_t cap; /* power of two, always at least twice the entries */
+} PathSet;
+
+static size_t
+path_hash(const char *s)
+{
+    size_t h = 2166136261u;
+
+    for (; *s; s++) {
+        h ^= (unsigned char)*s;
+        h *= 16777619u;
+    }
+    return h;
+}
+
+static int
+pathset_init(PathSet *set, size_t want)
+{
+    size_t cap = 16;
+
+    while (cap < want * 2)
+        cap <<= 1;
+    set->slots = (const char **)calloc(cap, sizeof *set->slots);
+    if (!set->slots)
+        return -1;
+    set->cap = cap;
+    return 0;
+}
+
+/* Returns the slot holding path, or the empty slot it belongs in. */
+static const char **
+pathset_slot(const PathSet *set, const char *path)
+{
+    size_t i = path_hash(path) & (set->cap - 1);
+
+    while (set->slots[i] && strcmp(set->slots[i], path) != 0)
+        i = (i + 1) & (set->cap - 1);
+    return &set->slots[i];
+}
+
+int
+playlist_add(Playlist *pl, const char *path)
+{
+    PlaybackStatus st;
+    int index, r;
+
+    r = pl_admit(pl, path, &index);
+    if (r == 0)
+        return 0;
+    if (r == 1)
+        playlist_autosave(pl);
 
     /* Appending during playback must never interrupt it; idle adds start the
-     * new entry so a drop or CLI arg still plays. */
-    if (idle)
+     * entry so a drop or CLI arg still plays, and a known track is restarted
+     * the same way. */
+    playback_get_status(&st);
+    if (st.state == MP_STOPPED)
         playlist_play_index(pl, index);
     return 1;
+}
+
+int
+playlist_add_many(Playlist *pl, const char *const *paths, int n, int *full)
+{
+    PlaybackStatus st;
+    PathSet set;
+    char resolved[PL_PATH_MAX];
+    const char **slot;
+    char *copy;
+    int i, index, added = 0, first = -1, dropped = 0;
+
+    if (full)
+        *full = 0;
+    if (!pl || !paths || n <= 0)
+        return 0;
+    if (pathset_init(&set, (size_t)pl->count + (size_t)n) != 0) {
+        SDL_Log("playlist: out of memory");
+        return 0;
+    }
+    for (i = 0; i < pl->count; i++) {
+        slot = pathset_slot(&set, pl->paths[i]);
+        if (!*slot)
+            *slot = pl->paths[i];
+    }
+    for (i = 0; i < n; i++) {
+        if (!pl_resolve(paths[i], resolved))
+            continue;
+        slot = pathset_slot(&set, resolved);
+        if (*slot)
+            continue; /* already listed: skipped silently */
+        if (pl->count >= PL_MAX_ENTRIES) {
+            dropped++;
+            continue;
+        }
+        copy = dup_string(resolved);
+        if (!copy || paths_push(&pl->paths, &pl->count, &pl->cap, copy) != 0) {
+            SDL_Log("playlist: out of memory");
+            continue;
+        }
+        index = pl->count - 1;
+        *slot = pl->paths[index];
+        if (first < 0)
+            first = index;
+        added++;
+    }
+    free(set.slots);
+
+    if (dropped > 0)
+        SDL_Log("playlist: list is full (%d entries), %d skipped", PL_MAX_ENTRIES,
+                dropped);
+    if (full)
+        *full = dropped;
+    if (added == 0)
+        return 0;
+
+    /* One autosave for the whole batch, not one per file. */
+    playlist_autosave(pl);
+    playback_get_status(&st);
+    if (st.state == MP_STOPPED)
+        playlist_play_index(pl, first);
+    return added;
 }
 
 void

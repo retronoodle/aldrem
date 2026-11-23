@@ -20,3 +20,4 @@ Thumbs.db
 tests/test_load
 tests/test_vu
 tests/test_settings
+tests/test_finder

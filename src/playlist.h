@@ -22,6 +22,11 @@ void        playlist_select(Playlist *pl, int index);
 /* Appends a supported regular file; returns 1 when added, 0 when skipped.
  * Autoplays the added entry only when playback is MP_STOPPED. */
 int  playlist_add(Playlist *pl, const char *path);
+/* Appends up to n paths with one autosave; returns how many were added. Starts
+ * the first new entry only when playback is MP_STOPPED. Known paths are skipped
+ * silently. Files that did not fit under the cap are counted in *full (may be
+ * NULL). */
+int  playlist_add_many(Playlist *pl, const char *const *paths, int n, int *full);
 void playlist_remove_selected(Playlist *pl);
 void playlist_clear(Playlist *pl);
 
