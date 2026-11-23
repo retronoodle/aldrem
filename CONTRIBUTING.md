@@ -99,3 +99,18 @@ If the decoder is vendored, add it under `vendor/` and document its upstream URL
 ## Reporting bugs and requesting features
 
 Use the issue templates in `.github/ISSUE_TEMPLATE/`. For bugs, include the platform, how you built it, the file format that misbehaved (a few seconds of audio that reproduces it helps), and any terminal output.
+
+## CI and releases (maintainers)
+
+CI runs on every push and PR: a `build` matrix (Ubuntu with gcc and clang, macOS with clang) under `-Werror`, a `test` job that generates a WAV fixture and runs `make test FIXTURE=...` headlessly (`SDL_VIDEODRIVER=dummy`, `SDL_AUDIODRIVER=dummy`), and a `release` job that only runs on a `v*` tag.
+
+Versions are SemVer tags `vMAJOR.MINOR.PATCH` on `main`. `make` derives the version from `git describe`, so the tag is the source of truth; `packaging/Info.plist` ships a placeholder that `make app` fills in. To cut a release:
+
+```sh
+# 1. move the version in docs/version, write the notes in docs/release-notes-<tag>.md
+git tag -a v0.1.0 -m "v0.1.0"
+git push origin v0.1.0
+# 2. wait for the release job to create a draft with aldrem-linux-x86_64 and
+#    aldrem.app.zip, review the notes, then publish it
+```
+

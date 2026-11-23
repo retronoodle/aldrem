@@ -43,7 +43,7 @@ jobs:
       - name: Install dependencies (macOS)
         if: runner.os == 'macOS'
         run: |
-          brew uninstall --ignore-dependencies sdl2 || true
+          brew uninstall --ignore-dependencies sdl2 2>/dev/null || true
           brew install sdl2 pkg-config
 
       - name: Build
@@ -141,5 +141,7 @@ jobs:
           files: |
             dist/aldrem-linux-x86_64
             dist/aldrem.app.zip
+          body_path: docs/release-notes-${{ github.ref_name }}.md
           generate_release_notes: true
           fail_on_unmatched_files: true
+          draft: true
