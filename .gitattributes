@@ -1,0 +1,21 @@
+# Normalize line endings for all text files.
+* text=auto eol=lf
+
+# Explicitly text, so diffs stay readable.
+*.c       text eol=lf
+*.h       text eol=lf
+*.md      text eol=lf
+*.py      text eol=lf
+*.svg     text eol=lf
+*.plist   text eol=lf
+*.desktop text eol=lf
+.in       text eol=lf
+Makefile  text eol=lf
+
+# Binary assets: never diff or convert these.
+*.png  binary
+*.icns binary
+*.ico  binary
+
+# Vendored third-party code is not ours to display in language stats.
+vendor/* linguist-vendored

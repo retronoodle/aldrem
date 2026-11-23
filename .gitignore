@@ -1,7 +1,17 @@
 aldrem
 *.o
 build/
+
+# OS noise
 .DS_Store
+Thumbs.db
+
+# Editor noise
+*.swp
+*.swo
+*~
+.vscode/
+.idea/
 
 # Kilo local config/plans
 .kilo/
