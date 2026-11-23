@@ -1,11 +1,9 @@
 name: build
 
 on:
+  # Release builds only: pushing a v* tag runs build, test and release.
   push:
-    branches: [main]
     tags: ['v*']
-  pull_request:
-    branches: [main]
   workflow_dispatch:
 
 permissions:

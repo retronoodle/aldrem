@@ -1,10 +1,9 @@
 name: CodeQL
 
 on:
+  # Release tags and a weekly scan; not run on PRs or main pushes.
   push:
-    branches: [main]
-  pull_request:
-    branches: [main]
+    tags: ['v*']
   schedule:
     - cron: "23 4 * * 1"
 
