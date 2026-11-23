@@ -360,8 +360,9 @@ ui_playlist_panel(Playlist *pl, struct nk_context *ctx, float scale,
                 if (nk_selectable_label(ctx, text, NK_TEXT_LEFT, &sel))
                     playlist_select(pl, i);
 
-                /* The playing row gets a cyan tint and a left bar, drawn over
-                 * the row after the label so the bar is never painted under it. */
+                /* The playing row gets a cyan tint and a left bar, drawn after
+                 * the label on top of it. The tint is translucent so the text
+                 * stays readable. */
                 if (i == current) {
                     struct nk_command_buffer *canvas = nk_window_get_canvas(ctx);
 
@@ -433,8 +434,8 @@ ui_transport_panel(struct nk_context *ctx, float scale, const struct MpTheme *th
     float volume = (float)st->volume_percent / 100.0f;
     int slider_live;
 
-    /* The time row carries the drop hint when nothing is loaded (timebuf). The
-     * seek bar stays on screen, disabled, so the dock keeps its shape. */
+    /* The time row shows --:-- when nothing is loaded. The seek bar stays on
+     * screen, disabled, so the dock keeps its shape. */
     nk_layout_row_dynamic(ctx, mp_s(35.0f, scale), 1);
     mp_time_label(ctx, th, curbuf, totbuf);
 
