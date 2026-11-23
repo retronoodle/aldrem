@@ -13,6 +13,8 @@ typedef struct Track Track; /* opaque */
 typedef struct {
     SDL_AudioSpec src_spec; /* format of the PCM returned by track_decode_chunk */
     Uint32 total_frames;    /* at src_spec.freq, for duration */
+    const char *codec;      /* static string ("WAV"/"MP3"), owned by impl */
+    int bits_per_sample;    /* decoded width, 0 when not meaningful (MP3) */
 } TrackInfo;
 
 /* Opens path and fills info on success. Returns NULL on failure with a

@@ -374,6 +374,8 @@ track_mp3_open(const char *path, TrackInfo *info, char *err, size_t errlen)
     info->src_spec.channels = (Uint8)t->channels;
     info->src_spec.freq = (int)t->hz;
     info->total_frames = t->total_frames;
+    info->codec = "MP3";
+    info->bits_per_sample = 0;
     return t;
 
 fail:

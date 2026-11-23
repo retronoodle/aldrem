@@ -398,6 +398,12 @@ playback_init(void)
     return 0;
 }
 
+int
+playback_available(void)
+{
+    return g.inited && g.dev_open;
+}
+
 void
 playback_shutdown(void)
 {
@@ -579,6 +585,25 @@ playback_set_volume(int percent)
 }
 
 void
+playback_adjust_volume(int delta)
+{
+    if (!g.inited)
+        return;
+    playback_set_volume(g.volume_percent + delta);
+}
+
+void
+playback_toggle(void)
+{
+    if (!g.inited)
+        return;
+    if ((PlaybackState)SDL_AtomicGet(&g.state) == MP_PLAYING)
+        playback_pause();
+    else
+        playback_play();
+}
+
+void
 playback_get_status(PlaybackStatus *out)
 {
     if (!out)
@@ -595,6 +620,13 @@ playback_get_status(PlaybackStatus *out)
     out->state = (PlaybackState)SDL_AtomicGet(&g.state);
     out->position = current_position(&g);
     out->volume_percent = g.volume_percent;
+
+    /* g.info is written only on this thread (playback_load). */
+    out->bits_per_sample = g.info.bits_per_sample;
+    out->sample_rate = g.info.src_spec.freq;
+    out->channels = g.info.src_spec.channels;
+    if (g.info.codec)
+        snprintf(out->codec, sizeof out->codec, "%s", g.info.codec);
 
     SDL_LockMutex(g.meta_mutex);
     out->has_track = g.has_track;

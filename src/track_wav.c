@@ -100,6 +100,8 @@ track_wav_open(const char *path, TrackInfo *info, char *err, size_t errlen)
 
     info->src_spec = spec;
     info->total_frames = len / block_align;
+    info->codec = "WAV";
+    info->bits_per_sample = (int)SDL_AUDIO_BITSIZE(spec.format);
     return t;
 }
 

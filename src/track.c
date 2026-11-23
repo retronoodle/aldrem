@@ -113,6 +113,9 @@ track_open(const char *path, TrackInfo *info, char *err, size_t errlen)
         return NULL;
     }
 
+    /* Zero so a decoder that sets few fields cannot leak uninitialised data. */
+    memset(info, 0, sizeof *info);
+
     /* A known extension is authoritative: no cross-format fallback, so a
      * mislabelled file fails loudly instead of decoding as something else. */
     if (ext_is(path, "wav"))

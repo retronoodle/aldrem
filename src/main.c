@@ -1,7 +1,7 @@
-/* mediaplayer — Phase 5: drag-and-drop and an in-app directory browser for
- * loading tracks, on top of the Phase 4 WAV/MP3 engine. A failed load keeps
- * the current track playing and shows the reason in the status label.
- * Arrow keys seek ±5 s; Esc closes the browser or quits (raw SDL events).
+/* mediaplayer — Phase 6: volume control, global Space/up/down shortcuts, an
+ * idle hint in the seek row, and a status label that surfaces the decoded
+ * format. Drag-and-drop, the in-app browser, WAV/MP3 playback, seeking (arrows)
+ * and Esc (close browser or quit) from earlier phases are unchanged.
  */
 #include <math.h>
 #include <stdio.h>
@@ -286,6 +286,8 @@ main(int argc, char **argv)
         SDL_Event evt;
         nk_input_begin(ctx);
         while (SDL_PollEvent(&evt)) {
+            int consumed = 0;
+
             if (evt.type == SDL_QUIT) {
                 running = 0;
             } else if (evt.type == SDL_DROPFILE) {
@@ -313,6 +315,24 @@ main(int argc, char **argv)
                        evt.key.keysym.scancode == SDL_SCANCODE_RIGHT) {
                 if (!file_browser_is_open(browser))
                     pending_seek += 5.0;
+            } else if (evt.type == SDL_KEYDOWN &&
+                       evt.key.keysym.scancode == SDL_SCANCODE_SPACE) {
+                /* Space/up/down are global: consumed so Nuklear never sees
+                 * them. Space toggles once per press; up/down repeat so a held
+                 * key ramps the volume. */
+                consumed = 1;
+                if (!evt.key.repeat && !file_browser_is_open(browser))
+                    playback_toggle();
+            } else if (evt.type == SDL_KEYDOWN &&
+                       evt.key.keysym.scancode == SDL_SCANCODE_UP) {
+                consumed = 1;
+                if (!file_browser_is_open(browser))
+                    playback_adjust_volume(5);
+            } else if (evt.type == SDL_KEYDOWN &&
+                       evt.key.keysym.scancode == SDL_SCANCODE_DOWN) {
+                consumed = 1;
+                if (!file_browser_is_open(browser))
+                    playback_adjust_volume(-5);
             } else if (evt.type == SDL_WINDOWEVENT &&
                        (evt.window.event == SDL_WINDOWEVENT_RESIZED ||
                         evt.window.event == SDL_WINDOWEVENT_SIZE_CHANGED ||
@@ -323,7 +343,8 @@ main(int argc, char **argv)
                 ratio = ui_get_pixel_size(win, ren, &px_w, &px_h);
             }
             ui_scale_mouse_event(&evt, ratio);
-            nk_sdl_handle_event(&evt);
+            if (!consumed)
+                nk_sdl_handle_event(&evt);
         }
         nk_input_end(ctx);
 
@@ -341,11 +362,13 @@ main(int argc, char **argv)
         char timebuf[64];
         char volbuf[32];
         char title[640];
-        const char *status_text;
+        char statusbuf[768];
+        char chbuf[16];
         const char *base;
         float progress, volume;
         double shown;
         int browser_open;
+        int slider_live;
 
         browser_open = file_browser_is_open(browser);
 
@@ -390,7 +413,7 @@ main(int argc, char **argv)
             progress = 1.0f;
 
         volume = (float)st.volume_percent / 100.0f;
-        snprintf(volbuf, sizeof volbuf, "vol %d", st.volume_percent);
+        snprintf(volbuf, sizeof volbuf, "vol %d%%", st.volume_percent);
 
         base = "";
         if (st.has_track) {
@@ -399,11 +422,26 @@ main(int argc, char **argv)
         }
 
         if (st.error[0]) {
-            status_text = st.error;
-        } else if (base[0]) {
-            status_text = base;
+            snprintf(statusbuf, sizeof statusbuf, "%s", st.error);
+        } else if (st.has_track) {
+            const char *codec = st.codec[0] ? st.codec : "audio";
+
+            if (st.channels == 1)
+                snprintf(chbuf, sizeof chbuf, "mono");
+            else if (st.channels == 2)
+                snprintf(chbuf, sizeof chbuf, "stereo");
+            else
+                snprintf(chbuf, sizeof chbuf, "%d ch", st.channels);
+
+            if (st.bits_per_sample > 0)
+                snprintf(statusbuf, sizeof statusbuf,
+                         "%s  |  %s %d-bit %d Hz %s",
+                         base, codec, st.bits_per_sample, st.sample_rate, chbuf);
+            else
+                snprintf(statusbuf, sizeof statusbuf, "%s  |  %s %d Hz %s",
+                         base, codec, st.sample_rate, chbuf);
         } else {
-            status_text = "no file loaded";
+            snprintf(statusbuf, sizeof statusbuf, "no file loaded");
         }
 
         /* The OS renders the title, so the em dash is safe here (the default
@@ -432,7 +470,7 @@ main(int argc, char **argv)
                 file_browser_open(browser, st.has_track ? st.name : NULL);
             if (!browser || browser_open)
                 nk_widget_disable_end(ctx);
-            nk_label(ctx, status_text, NK_TEXT_LEFT);
+            nk_label(ctx, statusbuf, NK_TEXT_LEFT);
 
             /* row 2: time label, centered */
             nk_layout_row_dynamic(ctx, ui_s(35.0f, ui_scale), 1);
@@ -440,9 +478,11 @@ main(int argc, char **argv)
 
             /* row 3: seek bar — click or drag to seek, released on mouse up */
             nk_layout_row_dynamic(ctx, ui_s(35.0f, ui_scale), 1);
-            if (ui_seek_bar(ctx, ui_scale, progress,
-                            st.has_track && !browser_open,
-                            &seek_dragging, &seek_preview)) {
+            if (!st.has_track) {
+                nk_label(ctx, "drop a .wav or .mp3 here", NK_TEXT_CENTERED);
+            } else if (ui_seek_bar(ctx, ui_scale, progress,
+                                   !browser_open,
+                                   &seek_dragging, &seek_preview)) {
                 playback_seek((double)seek_preview * st.duration);
             }
 
@@ -459,15 +499,20 @@ main(int argc, char **argv)
             if (!st.has_track || browser_open)
                 nk_widget_disable_end(ctx);
 
-            /* row 5: volume label + slider, disabled (Phase 6 wires it) */
+            /* row 5: volume label + slider; live with or without a track,
+             * disabled while the browser is modal or no audio device opened */
             nk_layout_row_template_begin(ctx, ui_s(30.0f, ui_scale));
             nk_layout_row_template_push_static(ctx, ui_s(60.0f, ui_scale));
             nk_layout_row_template_push_dynamic(ctx);
             nk_layout_row_template_end(ctx);
+            slider_live = !browser_open && playback_available();
             nk_label(ctx, volbuf, NK_TEXT_LEFT);
-            nk_widget_disable_begin(ctx);
-            nk_slider_float(ctx, 0.0f, &volume, 1.0f, 0.01f);
-            nk_widget_disable_end(ctx);
+            if (!slider_live)
+                nk_widget_disable_begin(ctx);
+            if (nk_slider_float(ctx, 0.0f, &volume, 1.0f, 0.01f))
+                playback_set_volume((int)lroundf(volume * 100.0f));
+            if (!slider_live)
+                nk_widget_disable_end(ctx);
         }
         nk_end(ctx);
 
