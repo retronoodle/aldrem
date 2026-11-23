@@ -1,6 +1,6 @@
 /* Track — player-agnostic audio source interface.
- * Implementations (track_wav.c, track_mp3.c, track_flac.c, track_ogg.c) fill
- * in the same contract behind an opaque vtable.
+ * Implementations (track_wav.c, track_mp3.c, track_flac.c, track_ogg.c,
+ * track_aiff.c) fill in the same contract behind an opaque vtable.
  */
 #ifndef TRACK_H
 #define TRACK_H
