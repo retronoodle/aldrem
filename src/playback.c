@@ -42,6 +42,7 @@ struct Playback {
 
     Track *track;
     TrackInfo info;
+    int live_paused; /* a live stream was paused: stopped, but not idle */
 
     /* Seconds at the start of the current decoder session. Written only on the
      * UI thread (load/stop/seek/EOF); position = base + frames_played/freq. */
@@ -315,6 +316,9 @@ stop_session(struct Playback *p)
 
     if (p->thread_running) {
         SDL_AtomicSet(&p->quit_thread, 1);
+        /* A live decoder may be blocked on the socket: wake it first so the
+         * join does not wait out the network timeout. */
+        track_interrupt(p->track);
         SDL_WaitThread(p->thread, NULL);
         p->thread = NULL;
         p->thread_running = 0;
@@ -331,6 +335,7 @@ stop_session(struct Playback *p)
     SDL_AtomicSet(&p->decoder_done, 0);
     SDL_AtomicSet(&p->eof, 0);
     SDL_AtomicSet(&p->state, MP_STOPPED);
+    p->live_paused = 0;
     p->position_base = 0.0;
 }
 
@@ -354,7 +359,14 @@ start_session(struct Playback *p)
     SDL_AtomicSet(&p->frames_played, 0);
     SDL_AtomicSet(&p->rb_read, 0);
     SDL_AtomicSet(&p->rb_write, 0);
-    track_seek(p->track, src_frame_for(p, p->position_base));
+
+    /* For a live stream this reconnects if the last connection was used. A
+     * file track ignores the seek result, as it always has. */
+    if (track_seek(p->track, src_frame_for(p, p->position_base)) != 0
+        && p->info.is_live) {
+        set_error(p, "cannot reconnect to stream");
+        return -1;
+    }
 
     /* Rebuild rather than clear: a fresh stream also resets the resampler,
      * which is what a seek wants. */
@@ -553,6 +565,7 @@ playback_play(void)
     if (start_session(&g) != 0)
         return;
 
+    g.live_paused = 0;
     SDL_AtomicSet(&g.state, MP_PLAYING);
     SDL_PauseAudioDevice(g.dev, 0);
 }
@@ -562,10 +575,18 @@ playback_pause(void)
 {
     if (!g.inited)
         return;
+    if (SDL_AtomicGet(&g.state) != MP_PLAYING)
+        return;
+    /* A live stream cannot resume where it left off, so pause stops it: Play
+     * reconnects instead of playing stale buffered audio. */
+    if (g.info.is_live) {
+        stop_session(&g);
+        g.live_paused = 1;
+        return;
+    }
     /* Keep the device running: the callback outputs silence while paused, so
      * resume is gapless. */
-    if (SDL_AtomicGet(&g.state) == MP_PLAYING)
-        SDL_AtomicSet(&g.state, MP_PAUSED);
+    SDL_AtomicSet(&g.state, MP_PAUSED);
 }
 
 void
@@ -582,7 +603,7 @@ playback_seek(double seconds)
     PlaybackState prev;
     double dur;
 
-    if (!g.inited || !g.dev_open || !g.track)
+    if (!g.inited || !g.dev_open || !g.track || g.info.is_live)
         return -1;
 
     SDL_LockMutex(g.meta_mutex);
@@ -656,6 +677,12 @@ playback_toggle(void)
         playback_play();
 }
 
+int
+playback_is_live(void)
+{
+    return g.inited && g.info.is_live;
+}
+
 void
 playback_get_status(PlaybackStatus *out)
 {
@@ -688,6 +715,8 @@ playback_get_status(PlaybackStatus *out)
 
     /* g.info is written only on this thread (playback_load). */
     out->bits_per_sample = g.info.bits_per_sample;
+    out->is_live = g.info.is_live;
+    out->live_paused = g.live_paused;
     out->sample_rate = g.info.src_spec.freq;
     out->channels = g.info.src_spec.channels;
     if (g.info.codec)

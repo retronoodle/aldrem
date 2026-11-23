@@ -18,8 +18,11 @@
 
 #include "file_browser.h"
 #include "finder.h"
+#include "net.h"
 #include "playback.h"
 #include "playlist.h"
+#include "radio.h"
+#include "radio_search.h"
 #include "settings.h"
 #include "theme.h"
 #include "track.h"
@@ -214,7 +217,8 @@ enum {
     PL_ACTION_NONE      = 0,
     PL_ACTION_OPEN_LIST = 1 << 0,
     PL_ACTION_SAVE_AS   = 1 << 1,
-    PL_ACTION_FIND      = 1 << 2
+    PL_ACTION_FIND      = 1 << 2,
+    PL_ACTION_RADIO     = 1 << 3
 };
 
 /* The content column inside the root window: 720 pt wide at most, centred,
@@ -266,7 +270,8 @@ ui_list_height(struct nk_context *ctx, float scale, float row_h)
 
 static int
 ui_playlist_panel(Playlist *pl, struct nk_context *ctx, float scale,
-    int disabled, int find_ok, const struct MpTheme *th, int has_track)
+    int disabled, int find_ok, int radio_ok, const struct MpTheme *th,
+    int has_track)
 {
     char header[64];
     float row_h = mp_s(PL_ROW_H, scale);
@@ -287,7 +292,7 @@ ui_playlist_panel(Playlist *pl, struct nk_context *ctx, float scale,
     nk_layout_row_dynamic(ctx, bar_h, 1);
     nk_label(ctx, header, NK_TEXT_LEFT);
 
-    nk_layout_row_dynamic(ctx, bar_h, 5);
+    nk_layout_row_dynamic(ctx, bar_h, radio_ok ? 6 : 5);
     if (disabled)
         nk_widget_disable_begin(ctx);
     if (nk_button_label(ctx, "Open list"))
@@ -298,6 +303,8 @@ ui_playlist_panel(Playlist *pl, struct nk_context *ctx, float scale,
         actions |= PL_ACTION_FIND;
     if (!disabled && !find_ok)
         nk_widget_disable_end(ctx);
+    if (radio_ok && nk_button_label(ctx, "Radio"))
+        actions |= PL_ACTION_RADIO;
     if (nk_button_label(ctx, "Save as"))
         actions |= PL_ACTION_SAVE_AS;
     if (disabled)
@@ -348,7 +355,10 @@ ui_playlist_panel(Playlist *pl, struct nk_context *ctx, float scale,
                 struct nk_rect bounds;
                 nk_bool sel = (i == selected) ? nk_true : nk_false;
 
-                ui_track_label(playlist_path_at(pl, i), text, sizeof text);
+                if (playlist_label_at(pl, i))
+                    snprintf(text, sizeof text, "%s", playlist_label_at(pl, i));
+                else
+                    ui_track_label(playlist_path_at(pl, i), text, sizeof text);
 
                 /* Read the row rect before drawing it: nk_widget_bounds peeks
                  * at the next slot, so asking after the label names the row
@@ -509,7 +519,8 @@ ui_transport_panel(struct nk_context *ctx, float scale, const struct MpTheme *th
     nk_layout_row_dynamic(ctx, mp_s(35.0f, scale), 1);
     if (!st->has_track) {
         mp_label_muted(ctx, th, "no track loaded", NK_TEXT_CENTERED);
-    } else if (mp_seek_bar(ctx, scale, th, progress, !modal_active,
+    } else if (mp_seek_bar(ctx, scale, th, progress,
+                           !modal_active && !st->is_live,
                            seek_dragging, seek_preview, st->duration,
                            ub->opt.dt, &ub->seek)) {
         *seek_out = (double)*seek_preview * st->duration;
@@ -830,6 +841,310 @@ ui_finder_modal(struct nk_context *ctx, float scale, float screen_w,
     return keep;
 }
 
+/* Adds one station and starts it, connecting at most once. The add itself
+ * autoplays a new row when playback was idle (and not a paused live stream),
+ * so in that case it has already tried: a failure there is reported, not
+ * retried. */
+static void
+ui_radio_play(Playlist *pl, const RadioStation *st, char *msg, size_t msglen)
+{
+    const char *urls[1], *names[1];
+    int full = 0, i, index = -1, added;
+    PlaybackStatus before;
+
+    urls[0] = st->url;
+    names[0] = st->name;
+    playback_get_status(&before);
+    added = playlist_add_stations(pl, urls, names, 1, &full);
+    for (i = 0; i < playlist_count(pl); i++) {
+        const char *have = playlist_path_at(pl, i);
+
+        if (have && strcmp(have, st->url) == 0) {
+            index = i;
+            break;
+        }
+    }
+    if (index < 0) {
+        snprintf(msg, msglen, "The list is full.");
+        return;
+    }
+    if (added > 0 && before.state == MP_STOPPED && !before.live_paused) {
+        if (playlist_current(pl) != index)
+            snprintf(msg, msglen, "Could not connect to that station.");
+        else
+            msg[0] = '\0';
+        return;
+    }
+    /* Already playing this one: nothing to do. Anything else (idle, paused,
+     * or another row) starts it. */
+    if (playlist_current(pl) == index && before.state == MP_PLAYING) {
+        msg[0] = '\0';
+        return;
+    }
+    if (playlist_play_index(pl, index) != 0) {
+        snprintf(msg, msglen, "Could not connect to that station.");
+        return;
+    }
+    msg[0] = '\0';
+}
+
+/* Plays the search result at row index (copies it out first: radio_search_at
+ * reuses one buffer). */
+static void
+ui_radio_play_row(Playlist *pl, RadioSearch *rs, int index, char *msg,
+    size_t msglen)
+{
+    const RadioStation *st = radio_search_at(rs, index);
+
+    if (st) {
+        RadioStation copy = *st;
+
+        ui_radio_play(pl, &copy, msg, msglen);
+    }
+}
+
+/* Adds the checked stations (all = every result). Copies them out first:
+ * radio_search_at hands back one station at a time. */
+static void
+ui_radio_add(Playlist *pl, RadioSearch *rs, const unsigned char *checked,
+    int all, char *msg, size_t msglen)
+{
+    const int count = radio_search_count(rs);
+    RadioStation *picked;
+    const char **urls, **names;
+    int i, n = 0, added, full = 0;
+
+    for (i = 0; i < count; i++) {
+        if (all || checked[i])
+            n++;
+    }
+    if (n == 0) {
+        snprintf(msg, msglen, "Nothing selected.");
+        return;
+    }
+    picked = (RadioStation *)malloc(sizeof *picked * (size_t)n);
+    urls = (const char **)malloc(sizeof *urls * (size_t)n);
+    names = (const char **)malloc(sizeof *names * (size_t)n);
+    if (!picked || !urls || !names) {
+        free(picked);
+        free(urls);
+        free(names);
+        snprintf(msg, msglen, "Out of memory.");
+        return;
+    }
+    for (i = 0, n = 0; i < count; i++) {
+        const RadioStation *st;
+
+        if (!all && !checked[i])
+            continue;
+        st = radio_search_at(rs, i);
+        if (!st)
+            continue;
+        picked[n] = *st;
+        urls[n] = picked[n].url;
+        names[n] = picked[n].name;
+        n++;
+    }
+    added = playlist_add_stations(pl, urls, names, n, &full);
+    free(picked);
+    free((void *)urls);
+    free((void *)names);
+
+    if (full > 0)
+        snprintf(msg, msglen, "Added %d station%s; %d skipped, list is full.",
+                 added, added == 1 ? "" : "s", full);
+    else
+        snprintf(msg, msglen, "Added %d station%s.", added,
+                 added == 1 ? "" : "s");
+}
+
+/* Row text: name first so it survives clipping, then country and codec. */
+static void
+ui_radio_row_label(const RadioStation *st, char *out, size_t outlen)
+{
+    const char *country = st->country[0] ? st->country : "?";
+
+    if (st->bitrate > 0)
+        snprintf(out, outlen, "%s  -  %s  -  %s %d kbit/s", st->name, country,
+                 st->codec, st->bitrate);
+    else
+        snprintf(out, outlen, "%s  -  %s  -  %s", st->name, country, st->codec);
+}
+
+#define RADIO_DOUBLE_CLICK_MS 400
+
+/* Radio dialog. Returns 1 while it should stay open. The search runs on its
+ * own thread; each frame only reads its state. Stations are played from a row
+ * click plus Play, or added by checkbox. */
+static int
+ui_radio_modal(struct nk_context *ctx, float scale, float screen_w,
+    float screen_h, RadioSearch *rs, Playlist *pl, char *query, size_t querylen,
+    unsigned char *checked, int *selected, int *searched, int *focus,
+    char *msg, size_t msglen, int *last_click, Uint32 *last_click_ms)
+{
+    struct nk_rect bounds;
+    float margin = mp_s(40.0f, scale);
+    float w = mp_s(640.0f, scale);
+    float h = mp_s(480.0f, scale);
+    float row_h = mp_s(28.0f, scale);
+    float bar_h = mp_s(28.0f, scale);
+    int running, count;
+    int keep = 1;
+    int play_row = -1;
+
+    if (w > screen_w - 2.0f * margin)
+        w = screen_w - 2.0f * margin;
+    if (h > screen_h - 2.0f * margin)
+        h = screen_h - 2.0f * margin;
+    if (w < 1.0f)
+        w = screen_w;
+    if (h < 1.0f)
+        h = screen_h;
+    bounds = nk_rect(lroundf((screen_w - w) * 0.5f),
+                     lroundf((screen_h - h) * 0.5f),
+                     lroundf(w), lroundf(h));
+
+    if (nk_begin(ctx, "Radio", bounds,
+                 NK_WINDOW_BORDER | NK_WINDOW_TITLE | NK_WINDOW_NO_SCROLLBAR)) {
+        nk_flags evt;
+        int do_search = 0;
+        char status[200];
+        const char *err;
+
+        nk_layout_row_dynamic(ctx, row_h, 1);
+        nk_label(ctx, "Station name (internet radio via Radio Browser):",
+                 NK_TEXT_LEFT);
+
+        if (*focus) {
+            nk_edit_focus(ctx, 0);
+            *focus = 0;
+        }
+        nk_layout_row_dynamic(ctx, row_h, 1);
+        evt = nk_edit_string_zero_terminated(ctx,
+            NK_EDIT_FIELD | NK_EDIT_SIG_ENTER, query, (int)querylen,
+            nk_filter_default);
+        if (evt & NK_EDIT_COMMITED)
+            do_search = 1;
+
+        running = radio_search_running(rs);
+        nk_layout_row_dynamic(ctx, bar_h, 2);
+        if (running) {
+            if (nk_button_label(ctx, "Stop"))
+                radio_search_cancel(rs);
+        } else if (nk_button_label(ctx, "Search")) {
+            do_search = 1;
+        }
+        if (nk_button_label(ctx, "Close"))
+            keep = 0;
+
+        if (do_search && !running && query[0]) {
+            memset(checked, 0, RADIO_MAX_RESULT);
+            *selected = -1;
+            *searched = 1;
+            if (radio_search_start(rs, query) == 0)
+                msg[0] = '\0';
+        }
+        running = radio_search_running(rs);
+        count = radio_search_count(rs);
+        err = radio_search_error(rs);
+
+        if (running)
+            snprintf(status, sizeof status, "%s",
+                     radio_search_cancelled(rs) ? "Stopping..." : "Searching...");
+        else if (err[0])
+            snprintf(status, sizeof status, "%s", err);
+        else if (radio_search_cancelled(rs))
+            snprintf(status, sizeof status, "Search stopped.");
+        else if (!*searched)
+            snprintf(status, sizeof status,
+                     "Type a station name and press Search.");
+        else if (count == 0)
+            snprintf(status, sizeof status, "No stations found.");
+        else
+            snprintf(status, sizeof status,
+                     "%d station%s found, most popular first.",
+                     count, count == 1 ? "" : "s");
+        nk_layout_row_dynamic(ctx, row_h, 1);
+        nk_label(ctx, status, NK_TEXT_LEFT);
+        if (msg[0]) {
+            nk_layout_row_dynamic(ctx, row_h, 1);
+            nk_label(ctx, msg, NK_TEXT_LEFT);
+        }
+
+        if (count > 0) {
+            struct nk_list_view view;
+            float list_h = ui_list_height(ctx, scale, row_h);
+
+            nk_layout_row_dynamic(ctx, list_h, 1);
+            if (running)
+                nk_widget_disable_begin(ctx);
+            if (nk_list_view_begin(ctx, &view, "stations", NK_WINDOW_BORDER,
+                                   (int)row_h, count)) {
+                int i;
+
+                for (i = view.begin; i < view.end; i++) {
+                    const RadioStation *st = radio_search_at(rs, i);
+                    RadioStation copy;
+                    char label[600];
+                    nk_bool on = checked[i] ? nk_true : nk_false;
+
+                    if (!st)
+                        continue;
+                    copy = *st; /* radio_search_at reuses one buffer */
+                    ui_radio_row_label(&copy, label, sizeof label);
+
+                    nk_layout_row_template_begin(ctx, row_h);
+                    nk_layout_row_template_push_static(ctx, row_h);
+                    nk_layout_row_template_push_dynamic(ctx);
+                    nk_layout_row_template_end(ctx);
+
+                    nk_checkbox_label(ctx, "", &on);
+                    checked[i] = on ? 1 : 0;
+                    if (nk_select_label(ctx, label, NK_TEXT_LEFT, *selected == i)) {
+                        Uint32 now = SDL_GetTicks();
+
+                        *selected = i;
+                        if (*last_click == i &&
+                            now - *last_click_ms < RADIO_DOUBLE_CLICK_MS) {
+                            play_row = i;
+                            *last_click = -1;
+                        } else {
+                            *last_click = i;
+                            *last_click_ms = now;
+                        }
+                    }
+                }
+                nk_list_view_end(&view);
+            }
+            if (running)
+                nk_widget_disable_end(ctx);
+        }
+        /* Deferred until after the list: playing connects, and the list is
+         * already laid out for this frame. */
+        if (play_row >= 0)
+            ui_radio_play_row(pl, rs, play_row, msg, msglen);
+
+        nk_layout_row_dynamic(ctx, bar_h, 3);
+        if (running || *selected < 0)
+            nk_widget_disable_begin(ctx);
+        if (nk_button_label(ctx, "Play"))
+            ui_radio_play_row(pl, rs, *selected, msg, msglen);
+        if (running || *selected < 0)
+            nk_widget_disable_end(ctx);
+
+        if (running || count == 0)
+            nk_widget_disable_begin(ctx);
+        if (nk_button_label(ctx, "Add selected"))
+            ui_radio_add(pl, rs, checked, 0, msg, msglen);
+        if (nk_button_label(ctx, "Add all"))
+            ui_radio_add(pl, rs, checked, 1, msg, msglen);
+        if (running || count == 0)
+            nk_widget_disable_end(ctx);
+    }
+    nk_end(ctx);
+    return keep;
+}
+
 int
 main(int argc, char **argv)
 {
@@ -949,6 +1264,10 @@ main(int argc, char **argv)
     if (!finder)
         SDL_Log("finder allocation failed; Find audio is disabled");
 
+    RadioSearch *radio = radio_search_create();
+    if (!radio)
+        SDL_Log("radio allocation failed; Radio is disabled");
+
     /* Restores the autosaved queue (never plays) before anything is added. */
     Playlist *pl = playlist_create();
     if (!pl)
@@ -979,6 +1298,15 @@ main(int argc, char **argv)
     char finder_root[4096] = "";
     char finder_msg[256] = "";
     unsigned char finder_checked[FINDER_MAX_RESULT];
+    int radio_open = 0;
+    int radio_focus = 0;
+    int radio_searched = 0;
+    int radio_sel = -1;
+    int radio_last_click = -1;
+    Uint32 radio_last_click_ms = 0;
+    char radio_query[256] = "";
+    char radio_msg[256] = "";
+    unsigned char radio_checked[RADIO_MAX_RESULT];
 
     struct UiButtons buttons;
     memset(&buttons, 0, sizeof buttons);
@@ -1008,7 +1336,7 @@ main(int argc, char **argv)
             int consumed = 0;
 
             /* Recomputed per event: Esc can close a modal mid-batch. */
-            modal_active = save_modal_open || finder_open ||
+            modal_active = save_modal_open || finder_open || radio_open ||
                 file_browser_is_open(browser);
 
             /* A click is a pointer gesture, so it drops keyboard focus: the
@@ -1036,6 +1364,10 @@ main(int argc, char **argv)
                 } else if (finder_open) {
                     finder_cancel(finder);
                     finder_open = 0;
+                    SDL_StopTextInput();
+                } else if (radio_open) {
+                    radio_search_cancel(radio);
+                    radio_open = 0;
                     SDL_StopTextInput();
                 } else if (file_browser_is_open(browser))
                     file_browser_close(browser);
@@ -1129,7 +1461,8 @@ main(int argc, char **argv)
         int dock_open;
 
         browser_open = file_browser_is_open(browser);
-        modal_active = save_modal_open || finder_open || browser_open;
+        modal_active = save_modal_open || finder_open || radio_open ||
+            browser_open;
 
         /* One dt per frame for the easing and the theme clock, clamped so a
          * stalled window (a drag, a resize) cannot jump an animation to its
@@ -1175,7 +1508,15 @@ main(int argc, char **argv)
             ? (double)seek_preview * st.duration
             : st.position;
 
-        if (st.has_track) {
+        if (st.has_track && st.is_live) {
+            /* No length: elapsed time since the stream opened, and LIVE. */
+            int cur = (int)st.position;
+
+            if (cur < 0)
+                cur = 0;
+            snprintf(curbuf, sizeof curbuf, "%d:%02d", cur / 60, cur % 60);
+            snprintf(totbuf, sizeof totbuf, "LIVE");
+        } else if (st.has_track) {
             int cur = (int)shown;
             int dur = (int)st.duration;
             if (cur < 0)
@@ -1201,6 +1542,12 @@ main(int argc, char **argv)
         if (st.has_track) {
             const char *slash = strrchr(st.name, '/');
             base = slash ? slash + 1 : st.name;
+            if (st.is_live) {
+                /* A stream's URL means little to a reader: show the station. */
+                const char *label = playlist_label_at(pl, playlist_current(pl));
+
+                base = label ? label : st.name;
+            }
         }
 
         /* Header chips: the same decoded fields as before, one chip each. */
@@ -1272,7 +1619,8 @@ main(int argc, char **argv)
                           browser && !modal_active, &buttons.open,
                           &buttons.opt)) {
                 browser_list_mode = 0;
-                file_browser_open(browser, st.has_track ? st.name : NULL);
+                file_browser_open(browser,
+                                  st.has_track && !st.is_live ? st.name : NULL);
             }
             if (st.error[0])
                 mp_error_panel(ctx, ui_scale, &theme, st.error);
@@ -1307,8 +1655,9 @@ main(int argc, char **argv)
                 mp_dock_end(ctx);
             nk_layout_row_dynamic(ctx, mp_s(4.0f, ui_scale), 1);
             panel_actions = ui_playlist_panel(pl, ctx, ui_scale, modal_active,
-                                              finder != NULL, &theme,
-                                              st.has_track);
+                                              finder != NULL,
+                                              radio != NULL && net_available(),
+                                              &theme, st.has_track);
         }
         nk_end(ctx);
         nk_style_pop_style_item(ctx);
@@ -1322,7 +1671,8 @@ main(int argc, char **argv)
          * never opened from inside another window's draw. */
         if (panel_actions & PL_ACTION_OPEN_LIST) {
             browser_list_mode = 1;
-            file_browser_open_for(browser, st.has_track ? st.name : NULL,
+            file_browser_open_for(browser,
+                                  st.has_track && !st.is_live ? st.name : NULL,
                                   playlist_ext_supported, "Open playlist");
         }
         if (panel_actions & PL_ACTION_SAVE_AS) {
@@ -1330,6 +1680,12 @@ main(int argc, char **argv)
             save_err[0] = '\0';
             save_focus = 1;
             save_modal_open = 1;
+            SDL_StartTextInput();
+        }
+        if (panel_actions & PL_ACTION_RADIO) {
+            radio_msg[0] = '\0';
+            radio_focus = 1;
+            radio_open = 1;
             SDL_StartTextInput();
         }
         if (panel_actions & PL_ACTION_FIND) {
@@ -1392,6 +1748,19 @@ main(int argc, char **argv)
             }
         }
 
+        /* Radio polls its worker thread each frame; the dialog only reads. */
+        if (radio_open) {
+            if (!ui_radio_modal(ctx, ui_scale, (float)px_w, (float)px_h, radio,
+                                pl, radio_query, sizeof radio_query,
+                                radio_checked, &radio_sel, &radio_searched,
+                                &radio_focus, radio_msg, sizeof radio_msg,
+                                &radio_last_click, &radio_last_click_ms)) {
+                radio_search_cancel(radio);
+                radio_open = 0;
+                SDL_StopTextInput();
+            }
+        }
+
         mp_theme_backdrop(ren, px_w, px_h, &theme);
         nk_sdl_render(NK_ANTI_ALIASING_ON);
         SDL_RenderPresent(ren);
@@ -1404,6 +1773,7 @@ main(int argc, char **argv)
 
     /* Join the decoder thread and close the device before tearing down
      * SDL/Nuklear; otherwise macOS complains about an open audio device. */
+    radio_search_free(radio);
     finder_free(finder);
     file_browser_destroy(browser);
     playback_shutdown();

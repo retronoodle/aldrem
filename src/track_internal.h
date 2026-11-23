@@ -12,6 +12,7 @@ typedef struct TrackOps {
     int  (*decode_chunk)(Track *, Uint8 *, int);
     int  (*seek)(Track *, Uint32);
     void (*close)(Track *);
+    void (*interrupt)(Track *); /* optional; NULL for local files */
 } TrackOps;
 
 typedef struct {
@@ -23,5 +24,8 @@ Track *track_mp3_open(const char *path, TrackInfo *info, char *err, size_t errle
 Track *track_flac_open(const char *path, TrackInfo *info, char *err, size_t errlen);
 Track *track_ogg_open(const char *path, TrackInfo *info, char *err, size_t errlen);
 Track *track_aiff_open(const char *path, TrackInfo *info, char *err, size_t errlen);
+
+/* Live http(s) source in track_stream.c. */
+Track *track_stream_open(const char *url, TrackInfo *info, char *err, size_t errlen);
 
 #endif

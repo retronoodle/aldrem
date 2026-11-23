@@ -15,6 +15,9 @@ void playlist_destroy(Playlist *pl);
 
 int         playlist_count(const Playlist *pl);
 const char *playlist_path_at(const Playlist *pl, int index); /* NULL if out of range */
+/* Station name for a row, or NULL for files and unnamed rows: the caller falls
+ * back to the file's basename. */
+const char *playlist_label_at(const Playlist *pl, int index);
 int         playlist_current(const Playlist *pl);  /* playing row, -1 when none */
 int         playlist_selected(const Playlist *pl); /* highlighted row, -1 when none */
 void        playlist_select(Playlist *pl, int index);
@@ -27,6 +30,11 @@ int  playlist_add(Playlist *pl, const char *path);
  * silently. Files that did not fit under the cap are counted in *full (may be
  * NULL). */
 int  playlist_add_many(Playlist *pl, const char *const *paths, int n, int *full);
+/* Appends up to n internet radio stations, named from names[i] (may be NULL,
+ * entries may be NULL). Same dedupe, autosave and autoplay rules as
+ * playlist_add_many. */
+int  playlist_add_stations(Playlist *pl, const char *const *urls,
+                           const char *const *names, int n, int *full);
 void playlist_remove_selected(Playlist *pl);
 void playlist_clear(Playlist *pl);
 

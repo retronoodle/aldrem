@@ -15,6 +15,7 @@ typedef struct {
     Uint32 total_frames;    /* at src_spec.freq, for duration */
     const char *codec;      /* static string ("WAV"/"MP3"), owned by impl */
     int bits_per_sample;    /* decoded width, 0 when not meaningful (MP3) */
+    int is_live;            /* 1 for a network stream: no length, no seeking */
 } TrackInfo;
 
 /* Opens path and fills info on success. Returns NULL on failure with a
@@ -32,6 +33,10 @@ int track_decode_chunk(Track *t, Uint8 *dst, int cap);
 
 /* Positions the cursor at frame (clamped to the end of the stream). */
 int track_seek(Track *t, Uint32 frame);
+
+/* Asks a decoder that may be blocked on the network to stop. Safe from any
+ * thread. No-op for local files. */
+void track_interrupt(Track *t);
 
 void track_close(Track *t);
 

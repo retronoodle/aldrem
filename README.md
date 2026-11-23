@@ -28,6 +28,7 @@ Most audio players are 200 MB of framework wrapped around `Play`. This one isn't
 - **Pure C99.** No C++, no Rust bindings, no runtime. If you can read C, you can read this.
 - **One binary.** `make` and you're done. Vendored decoders mean no dependency hell at build time.
 - **Actually plays your files.** WAV, MP3, FLAC, Ogg Vorbis, AIFF/AIFC — five formats, one interface.
+- **Internet radio.** Search the open Radio Browser directory by name and play live stations, MP3, Ogg Vorbis and AAC, alongside your files.
 - **Instant and lightweight.** Decode-ahead ring buffer, sample-accurate playhead, no dropouts.
 - **Zero-fuss loading.** Drag a file onto the window, or use the built-in file browser.
 - **A queue that survives a restart.** Everything you add is kept in a playlist, autosaved as plain `.m3u`, and waiting for you next time.
@@ -43,6 +44,8 @@ Most audio players are 200 MB of framework wrapped around `Play`. This one isn't
 | AIFF / AIFC   | `.aiff`, `.aif`, `.aifc`       | custom reader  |
 
 Format detection works by extension, with magic-byte sniffing as a fallback — rename the file and it still plays.
+
+**Internet radio** streams are MP3, Ogg Vorbis and AAC (AAC needs an FFmpeg build; see Build). The codec comes from the server's `Content-Type`, falling back to sniffing the first bytes. A stream has no length and no seek bar: the time shows elapsed time and `LIVE`, and pause stops the stream, so Play reconnects.
 
 ## Controls
 
@@ -65,16 +68,16 @@ The progress and volume sliders are live: seek mid-track, adjust volume, and it 
 
 Anything you drop or open is appended to the playlist under the player. The track that is already playing keeps playing; when the player is idle, the first added file starts. Double-click a row to jump to it, and the end of a track auto-advances to the next one — playback stops at the end of the list, with no wrap.
 
-The live list is autosaved to `$XDG_CONFIG_HOME/aldrem/playlist.m3u` (usually `~/.config/aldrem/playlist.m3u`; the same path on macOS) on every change and on quit, and restored at launch. `Find audio` searches a folder (default `$HOME`; type `/` for the whole machine) for supported audio and adds the ones you tick, or all of them, to the playlist. `Save as` writes a standard `.m3u` file you can share or open elsewhere; `Open list` loads one, replacing the current queue. There is no reordering, repeat or shuffle in this version.
+The live list is autosaved to `$XDG_CONFIG_HOME/aldrem/playlist.m3u` (usually `~/.config/aldrem/playlist.m3u`; the same path on macOS) on every change and on quit, and restored at launch. `Find audio` searches a folder (default `$HOME`; type `/` for the whole machine) for supported audio and adds the ones you tick, or all of them, to the playlist. `Radio` searches [Radio Browser](https://www.radio-browser.info/) by station name and plays a station or adds it to the playlist; stations are saved as `#EXTINF` entries with their URLs. `Save as` writes a standard `.m3u` file you can share or open elsewhere; `Open list` loads one, replacing the current queue. There is no reordering, repeat or shuffle in this version.
 
 ## Build
 
-Requires a C compiler, `make`, `pkg-config`, and SDL2 development headers.
+Requires a C compiler, `make`, `pkg-config`, and SDL2 development headers. Internet radio also needs libcurl, and AAC streams need FFmpeg's libavcodec and libavutil. Both are optional: the build detects them through `pkg-config`, and `make NET=0 AAC=0` builds without either (the Radio button is then hidden).
 
 **macOS**
 
 ```sh
-brew install sdl2
+brew install sdl2 curl ffmpeg
 make
 ./aldrem
 ```
@@ -82,7 +85,7 @@ make
 **Debian / Ubuntu**
 
 ```sh
-sudo apt install build-essential pkg-config libsdl2-dev
+sudo apt install build-essential pkg-config libsdl2-dev libcurl4-openssl-dev libavcodec-dev libavutil-dev
 make
 ./aldrem
 ```
@@ -90,7 +93,7 @@ make
 **Fedora**
 
 ```sh
-sudo dnf install gcc make pkgconf-pkg-config SDL2-devel
+sudo dnf install gcc make pkgconf-pkg-config SDL2-devel libcurl-devel ffmpeg-devel
 make
 ./aldrem
 ```
@@ -131,6 +134,9 @@ Shared state (position, duration, volume, status) sits behind a single mutex; th
 - [minimp3](https://github.com/lieff/minimp3) — public domain MP3 decoder (vendored)
 - [dr_flac](https://github.com/mackron/dr_libs) — public domain FLAC decoder (vendored)
 - [stb_vorbis](https://github.com/nothings/stb) — public domain Ogg Vorbis decoder (vendored)
+- [jsmn](https://github.com/zserge/jsmn) — MIT JSON tokenizer, for Radio Browser replies (vendored)
+- [libcurl](https://curl.se/libcurl/) — HTTP(S) for internet radio (optional, `NET=0` disables)
+- [FFmpeg](https://ffmpeg.org/) libavcodec and libavutil — AAC decoding for radio (optional, `AAC=0` disables). LGPL, linked dynamically.
 
 Licenses for the vendored libraries live alongside them in [`vendor/`](vendor/); each vendored header keeps its own upstream license (Nuklear, minimp3, dr_flac and stb_vorbis are public domain/MIT-0, SDL2 is zlib).
 
@@ -140,6 +146,7 @@ Licenses for the vendored libraries live alongside them in [`vendor/`](vendor/);
 - **FLAC:** stereo or mono. Multichannel FLAC is not supported, and neither is Ogg-encapsulated FLAC.
 - **Channels:** mono and stereo only — there is no surround or multichannel mixing. Everything is converted to 44.1 kHz stereo float32 for the device.
 - **Playlists:** no reordering, repeat or shuffle yet.
+- **Radio:** no now-playing metadata, no `.pls`/`.m3u` station URLs and no HLS (`.m3u8`) streams. Ogg Opus is not decoded. Opening a station waits on the network, so a dead station can freeze the window for up to about 8 seconds.
 - **Tags:** file and track names come from the path; embedded metadata is not read.
 
 ## Contributing

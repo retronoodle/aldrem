@@ -32,3 +32,11 @@ Source repo: https://github.com/nothings/stb — `master`, header self-reports *
 - `stb_vorbis.c` — https://raw.githubusercontent.com/nothings/stb/master/stb_vorbis.c
 
 No modifications. Public domain; license statement at the end of the file. Wired into the build via `src/track_ogg.c`, compiled as its own TU and decoded to interleaved S16. Limits: mono/stereo only; Ogg Opus/FLAC/Speex are not supported. For chained files, decoding stops at the first logical stream boundary while the length is taken from the file's final page, so duration and playback may be shorter than the first stream.
+
+## jsmn
+
+Source repo: https://github.com/zserge/jsmn — commit **25647e692c7906b96ffd2b05ca54c097948e879c** (master) — fetched 2026-11-23.
+
+- `jsmn.h` — https://raw.githubusercontent.com/zserge/jsmn/25647e692c7906b96ffd2b05ca54c097948e879c/jsmn.h
+
+No modifications. MIT license (Serge Zaitsev, 2010); license text is in the header. Used by `src/radio.c` to parse Radio Browser JSON. Built without `JSMN_PARENT_LINKS`, so the parser walks tokens by their `size` field.

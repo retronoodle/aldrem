@@ -36,6 +36,15 @@ track_seek(Track *t, Uint32 frame)
 }
 
 void
+track_interrupt(Track *t)
+{
+    const TrackOps *ops = ops_of(t);
+
+    if (ops && ops->interrupt)
+        ops->interrupt(t);
+}
+
+void
 track_close(Track *t)
 {
     const TrackOps *ops = ops_of(t);
@@ -129,6 +138,10 @@ track_open(const char *path, TrackInfo *info, char *err, size_t errlen)
 
     /* Zero so a decoder that sets few fields cannot leak uninitialised data. */
     memset(info, 0, sizeof *info);
+
+    /* Network streams are identified by scheme, not extension. */
+    if (strncmp(path, "http://", 7) == 0 || strncmp(path, "https://", 8) == 0)
+        return track_stream_open(path, info, err, errlen);
 
     /* A known extension is authoritative: no cross-format fallback, so a
      * mislabelled file fails loudly instead of decoding as something else. */

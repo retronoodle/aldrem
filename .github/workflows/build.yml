@@ -22,10 +22,18 @@ jobs:
         include:
           - os: ubuntu-latest
             cc: gcc
+            flags: ""
           - os: ubuntu-latest
             cc: clang
+            flags: ""
           - os: macos-latest
             cc: clang
+            flags: ""
+          # Stub leg: no libcurl, no FFmpeg. Keeps the SDL2-only path building;
+          # radio and AAC compile out and the Radio button is hidden.
+          - os: ubuntu-latest
+            cc: gcc
+            flags: "NET=0 AAC=0"
     steps:
       - uses: actions/checkout@v4
         with:
@@ -36,44 +44,46 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y libsdl2-dev pkg-config
+          sudo apt-get install -y libsdl2-dev pkg-config libcurl4-openssl-dev libavcodec-dev libavutil-dev
 
       - name: Install dependencies (macOS)
         if: runner.os == 'macOS'
         run: |
           brew uninstall --ignore-dependencies sdl2 2>/dev/null || true
-          brew install sdl2 pkg-config
+          brew install sdl2 pkg-config curl ffmpeg
+          # curl is keg-only on Homebrew, so pkg-config needs its path.
+          echo "PKG_CONFIG_PATH=$(brew --prefix curl)/lib/pkgconfig:${PKG_CONFIG_PATH}" >> "$GITHUB_ENV"
 
       - name: Build
         run: |
           make clean
-          make CC=${{ matrix.cc }} WERROR=1
+          make CC=${{ matrix.cc }} WERROR=1 ${{ matrix.flags }}
 
       - name: Check --version
         run: ./aldrem --version | grep -Eq '^aldrem .+'
 
       - name: Build .app bundle (macOS)
-        if: runner.os == 'macOS'
+        if: runner.os == 'macOS' && matrix.flags == ''
         run: |
           make app
           test -f build/aldrem.app/Contents/Info.plist
           plutil -lint build/aldrem.app/Contents/Info.plist
 
       - name: Package Linux binary
-        if: runner.os == 'Linux' && matrix.cc == 'gcc'
+        if: runner.os == 'Linux' && matrix.cc == 'gcc' && matrix.flags == ''
         run: |
           mkdir -p dist
           cp aldrem dist/aldrem-linux-x86_64
 
       - name: Package macOS bundle
-        if: runner.os == 'macOS'
+        if: runner.os == 'macOS' && matrix.flags == ''
         run: |
           mkdir -p dist
           ditto -c -k --sequesterRsrc --keepParent build/aldrem.app dist/aldrem.app.zip
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
-        if: runner.os == 'macOS' || (runner.os == 'Linux' && matrix.cc == 'gcc')
+        if: matrix.flags == '' && (runner.os == 'macOS' || (runner.os == 'Linux' && matrix.cc == 'gcc'))
         with:
           name: dist-${{ runner.os }}
           path: dist/*
@@ -92,7 +102,7 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y libsdl2-dev pkg-config
+          sudo apt-get install -y libsdl2-dev pkg-config libcurl4-openssl-dev libavcodec-dev libavutil-dev
 
       - name: Generate WAV fixture
         run: |

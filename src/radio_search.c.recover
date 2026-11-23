@@ -1,0 +1,295 @@
+/* radio_search.c — station search on a worker thread. See radio_search.h.
+ *
+ * Shared state (results, count, error) is written by the worker only at the
+ * end, under mu. The UI reads it under the same lock, so it never sees a
+ * half-written list. A cancel is cooperative: the worker checks the flag
+ * between fetches and drops its results.
+ */
+#include "radio_search.h"
+
+#include "net.h"
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+#include <SDL.h>
+
+#define MIRROR_LIST_URL "https://all.api.radio-browser.info/json/servers"
+#define FALLBACK_HOST   "de1.api.radio-browser.info"
+#define MIRROR_BODY_MAX (64 * 1024)
+#define STATIONS_BODY_MAX (2 * 1024 * 1024)
+#define MAX_HOSTS       4
+#define QUERY_MAX       256
+#define ERR_MAX         160
+
+struct RadioSearch {
+    SDL_mutex *mu;
+    SDL_Thread *thread;     /* joined before the next start and in free */
+    SDL_atomic_t running;   /* worker alive */
+    SDL_atomic_t cancel;    /* a cancel was requested for the current search */
+
+    /* Guarded by mu. */
+    RadioStation *results;  /* RADIO_MAX_RESULT entries, allocated once */
+    int count;
+    char error[ERR_MAX];
+};
+
+typedef struct {
+    RadioSearch *s;
+    char query[QUERY_MAX];
+} Job;
+
+static void
+set_error(RadioSearch *s, const char *msg)
+{
+    SDL_LockMutex(s->mu);
+    snprintf(s->error, sizeof s->error, "%s", msg);
+    SDL_UnlockMutex(s->mu);
+}
+
+/* Waits for the previous worker to exit. Only called when none is running. */
+static void
+join_thread(RadioSearch *s)
+{
+    if (s->thread) {
+        SDL_WaitThread(s->thread, NULL);
+        s->thread = NULL;
+    }
+}
+
+/* Fetches the mirror list and returns the usable hosts. Falls back to a known
+ * mirror when the list cannot be fetched or parsed. */
+static int
+load_hosts(char hosts[][RADIO_HOST_MAX], int max, char *body)
+{
+    size_t len = 0;
+    int n = 0;
+    char err[160];
+
+    if (net_fetch(MIRROR_LIST_URL, body, MIRROR_BODY_MAX, &len, err, sizeof err) == 0)
+        n = radio_parse_mirrors(body, len, hosts, max);
+    if (n <= 0) {
+        snprintf(hosts[0], RADIO_HOST_MAX, "%s", FALLBACK_HOST);
+        n = 1;
+    }
+    return n;
+}
+
+static int SDLCALL
+search_worker(void *data)
+{
+    Job *job = (Job *)data;
+    RadioSearch *s = job->s;
+    char (*hosts)[RADIO_HOST_MAX] = NULL;
+    char *body = NULL;
+    RadioStation *found = NULL;
+    int count = 0, nh, i, got = 0;
+    char err[ERR_MAX] = "";
+
+    body = (char *)malloc(STATIONS_BODY_MAX);
+    hosts = (char (*)[RADIO_HOST_MAX])malloc(sizeof *hosts * MAX_HOSTS);
+    found = (RadioStation *)malloc(sizeof *found * RADIO_MAX_RESULT);
+    if (!body || !hosts || !found) {
+        snprintf(err, sizeof err, "out of memory");
+        goto done;
+    }
+
+    nh = load_hosts(hosts, MAX_HOSTS, body);
+    for (i = 0; i < nh && !got; i++) {
+        char url[RADIO_URL_MAX];
+        char fetch_err[160] = "";
+        size_t len = 0;
+        int n;
+
+        if (SDL_AtomicGet(&s->cancel))
+            break;
+        if (radio_search_url(hosts[i], job->query, RADIO_MAX_RESULT,
+                             url, sizeof url) != 0) {
+            snprintf(err, sizeof err, "search text too long");
+            break;
+        }
+        if (net_fetch(url, body, STATIONS_BODY_MAX, &len, fetch_err,
+                      sizeof fetch_err) != 0) {
+            snprintf(err, sizeof err, "Radio Browser did not respond");
+            continue; /* try the next mirror */
+        }
+        n = radio_parse_stations(body, len, found, RADIO_MAX_RESULT);
+        if (n < 0) {
+            snprintf(err, sizeof err, "unexpected reply from Radio Browser");
+            continue;
+        }
+        count = n;
+        got = 1;
+        err[0] = '\0';
+    }
+done:
+    SDL_LockMutex(s->mu);
+    if (SDL_AtomicGet(&s->cancel)) {
+        /* Cancelled: nothing from this search is shown. */
+        s->count = 0;
+        s->error[0] = '\0';
+    } else {
+        if (got) {
+            /* Swap: the shared slot takes the new list, and the old buffer
+             * is freed below. */
+            RadioStation *old = s->results;
+
+            s->results = found;
+            found = old;
+            s->count = count;
+        } else {
+            s->count = 0;
+        }
+        snprintf(s->error, sizeof s->error, "%s", err);
+    }
+    SDL_UnlockMutex(s->mu);
+
+    free(found); /* the replaced results, or the unused buffer */
+    free(hosts);
+    free(body);
+    free(job);
+    SDL_AtomicSet(&s->running, 0);
+    return 0;
+}
+
+RadioSearch *
+radio_search_create(void)
+{
+    RadioSearch *s = (RadioSearch *)calloc(1, sizeof *s);
+
+    if (!s)
+        return NULL;
+    s->mu = SDL_CreateMutex();
+    s->results = (RadioStation *)calloc(RADIO_MAX_RESULT, sizeof *s->results);
+    if (!s->mu || !s->results) {
+        radio_search_free(s);
+        return NULL;
+    }
+    SDL_AtomicSet(&s->running, 0);
+    SDL_AtomicSet(&s->cancel, 0);
+    return s;
+}
+
+void
+radio_search_free(RadioSearch *s)
+{
+    if (!s)
+        return;
+    SDL_AtomicSet(&s->cancel, 1);
+    join_thread(s);
+    if (s->mu)
+        SDL_DestroyMutex(s->mu);
+    free(s->results);
+    free(s);
+}
+
+int
+radio_search_start(RadioSearch *s, const char *query)
+{
+    Job *job;
+
+    if (!s)
+        return -1;
+    if (!net_available()) {
+        set_error(s, "internet radio is not available in this build");
+        return -1;
+    }
+    if (!query || !*query) {
+        set_error(s, "type a station name to search");
+        return -1;
+    }
+    if (SDL_AtomicGet(&s->running)) {
+        set_error(s, "a search is still running");
+        return -1;
+    }
+    join_thread(s);
+
+    job = (Job *)calloc(1, sizeof *job);
+    if (!job) {
+        set_error(s, "out of memory");
+        return -1;
+    }
+    job->s = s;
+    snprintf(job->query, sizeof job->query, "%s", query);
+
+    SDL_LockMutex(s->mu);
+    s->count = 0;
+    s->error[0] = '\0';
+    SDL_UnlockMutex(s->mu);
+    SDL_AtomicSet(&s->cancel, 0);
+    SDL_AtomicSet(&s->running, 1);
+
+    s->thread = SDL_CreateThread(search_worker, "radio-search", job);
+    if (!s->thread) {
+        SDL_AtomicSet(&s->running, 0);
+        free(job);
+        set_error(s, "cannot start the search thread");
+        return -1;
+    }
+    return 0;
+}
+
+void
+radio_search_cancel(RadioSearch *s)
+{
+    if (s)
+        SDL_AtomicSet(&s->cancel, 1);
+}
+
+int
+radio_search_running(const RadioSearch *s)
+{
+    return s ? SDL_AtomicGet((SDL_atomic_t *)&s->running) : 0;
+}
+
+int
+radio_search_cancelled(const RadioSearch *s)
+{
+    return s ? SDL_AtomicGet((SDL_atomic_t *)&s->cancel) : 0;
+}
+
+int
+radio_search_count(const RadioSearch *s)
+{
+    int n;
+
+    if (!s)
+        return 0;
+    SDL_LockMutex(s->mu);
+    n = s->count;
+    SDL_UnlockMutex(s->mu);
+    return n;
+}
+
+/* Copies one station out under the lock, so the caller never reads a list
+ * that the worker is replacing. The result is valid until the next call. */
+const RadioStation *
+radio_search_at(const RadioSearch *s, int index)
+{
+    static RadioStation copy;
+    int ok = 0;
+
+    if (!s)
+        return NULL;
+    SDL_LockMutex(s->mu);g
+    if (index >= 0 && index < s->count) {
+        copy = s->results[index];
+        ok = 1;
+    }
+    SDL_UnlockMutex(s->mu);
+    return ok ? &copy : NULL;
+}
+
+const char *
+radio_search_error(const RadioSearch *s)
+{
+    static char copy[ERR_MAX];
+
+    if (!s)
+        return "";
+    SDL_LockMutex(s->mu);
+    snprintf(copy, sizeof copy, "%s", s->error);
+    SDL_UnlockMutex(s->mu);
+    return copy;
+}

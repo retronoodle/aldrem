@@ -23,6 +23,6 @@ Useful details: the version or commit, your platform, the file that triggers the
 
 ## Scope
 
-In scope: the player itself, the vendored decoders as wired into `src/` (e.g. a malformed `.mp3`/`.flac`/`.ogg`/`.aiff` causing a crash, memory corruption, or arbitrary file access), `.m3u` playlist parsing, and the file browser.
+In scope: the player itself, the vendored decoders as wired into `src/` (e.g. a malformed `.mp3`/`.flac`/`.ogg`/`.aiff` causing a crash, memory corruption, or arbitrary file access), `.m3u` playlist parsing, the file browser, and the internet radio network surface: the Radio Browser JSON parser, the libcurl transfer code in `src/net.c`, and the live MP3/Ogg/AAC stream decoders. The network surface is limited to `http` and `https` (redirects included, at most 5), sends no cookies or credentials, and caps response sizes. A malicious station or mirror that can crash the player or read or write local files is in scope.
 
 Out of scope: bugs in vendored upstream projects that are best fixed upstream (please also tell the upstream project), issues that need a locally modified binary, and anything requiring an already-compromised machine.

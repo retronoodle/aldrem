@@ -6,15 +6,15 @@ By participating you agree to the [Code of Conduct](CODE_OF_CONDUCT.md). Securit
 
 ## Build
 
-You need a C compiler, `make`, `pkg-config`, and SDL2 development headers.
+You need a C compiler, `make`, `pkg-config`, and SDL2 development headers. For internet radio you also need libcurl; for AAC streams, FFmpeg's libavcodec and libavutil. `make NET=0 AAC=0` builds without them, and CI keeps one leg on that stub configuration so the SDL2-only path cannot rot.
 
 ```sh
 # Debian / Ubuntu
-sudo apt install build-essential pkg-config libsdl2-dev
+sudo apt install build-essential pkg-config libsdl2-dev libcurl4-openssl-dev libavcodec-dev libavutil-dev
 # Fedora
-sudo dnf install gcc make pkgconf-pkg-config SDL2-devel
+sudo dnf install gcc make pkgconf-pkg-config SDL2-devel libcurl-devel ffmpeg-devel
 # macOS
-brew install sdl2
+brew install sdl2 curl ffmpeg
 
 make
 ./aldrem
@@ -52,6 +52,11 @@ Useful targets: `make run`, `make install` (`PREFIX=...` to relocate), `make app
 | `src/track_*.c` | one decoder per format |
 | `src/file_browser.c` | minimal in-app directory browser |
 | `src/finder.c` | recursive audio search, sliced per frame; pure, no SDL |
+| `src/radio.c` | Radio Browser URL building and JSON parsing; pure, no SDL or network |
+| `src/radio_search.c` | station search on a worker thread (fetch + parse) |
+| `src/net.c` | libcurl wrapper: streaming reads through a byte ring, and small fetches |
+| `src/track_stream.c` | live MP3 and Ogg decoding, reconnects, `http(s)://` routing |
+| `src/track_stream_aac.c` | AAC via libavcodec, behind `HAVE_AVCODEC` |
 | `src/track.h` / `src/track_internal.h` | public track API and the `TrackOps` contract |
 | `vendor/` | Nuklear, minimp3, dr_flac, stb_vorbis |
 
@@ -105,7 +110,7 @@ Use the issue templates in `.github/ISSUE_TEMPLATE/`. For bugs, include the plat
 
 ## CI and releases (maintainers)
 
-CI runs on every push and PR: a `build` matrix (Ubuntu with gcc and clang, macOS with clang) under `-Werror`, a `test` job that generates a WAV fixture and runs `make test FIXTURE=...` headlessly (`SDL_VIDEODRIVER=dummy`, `SDL_AUDIODRIVER=dummy`), and a `release` job that only runs on a `v*` tag.
+CI runs on every push and PR: a `build` matrix (Ubuntu with gcc and clang, macOS with clang, plus the Ubuntu gcc stub leg) under `-Werror`, a `build` leg with `NET=0 AAC=0` for the stub configuration, a `test` job that generates a WAV fixture and runs `make test FIXTURE=...` headlessly (`SDL_VIDEODRIVER=dummy`, `SDL_AUDIODRIVER=dummy`), and a `release` job that only runs on a `v*` tag.
 
 Versions are SemVer tags `vMAJOR.MINOR.PATCH` on `main`. `make` derives the version from `git describe`, so the tag is the source of truth; `packaging/Info.plist` ships a placeholder that `make app` fills in. To cut a release:
 

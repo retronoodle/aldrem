@@ -13,6 +13,7 @@
 #define _XOPEN_SOURCE 700
 #include "playlist.h"
 #include "playback.h"
+#include "net.h"
 #include "track.h"
 
 #include <errno.h>
@@ -29,6 +30,7 @@
 
 struct Playlist {
     char **paths;
+    char **names;    /* parallel to paths; NULL entry = unnamed (a file) */
     int count;
     int cap;
     int current;
@@ -53,45 +55,69 @@ dup_string(const char *s)
 }
 
 static void
-free_paths(char **paths, int count)
+free_entries(char **paths, char **names, int count)
 {
     int i;
 
-    if (!paths)
-        return;
-    for (i = 0; i < count; i++)
-        free(paths[i]);
+    if (paths)
+        for (i = 0; i < count; i++)
+            free(paths[i]);
+    if (names)
+        for (i = 0; i < count; i++)
+            free(names[i]);
     free(paths);
+    free(names);
 }
 
-/* Takes ownership of path; frees it on failure. */
+/* Appends one entry to the two parallel arrays, which always grow together.
+ * Takes ownership of path and name (name may be NULL); frees both on failure. */
 static int
-paths_push(char ***arr, int *count, int *cap, char *path)
+entry_push(char ***paths, char ***names, int *count, int *cap,
+    char *path, char *name)
 {
     if (*count >= PL_MAX_ENTRIES) {
         free(path);
+        free(name);
         return -1;
     }
     if (*count >= *cap) {
         int next = *cap ? *cap * 2 : 16;
-        char **grown;
+        char **grown_p, **grown_n;
 
         if (next > PL_MAX_ENTRIES)
             next = PL_MAX_ENTRIES;
         if (next <= *cap) {
             free(path);
+            free(name);
             return -1;
         }
-        grown = (char **)realloc(*arr, sizeof *grown * (size_t)next);
-        if (!grown) {
+        grown_p = (char **)realloc(*paths, sizeof *grown_p * (size_t)next);
+        if (!grown_p) {
             free(path);
+            free(name);
             return -1;
         }
-        *arr = grown;
+        *paths = grown_p;
+        grown_n = (char **)realloc(*names, sizeof *grown_n * (size_t)next);
+        if (!grown_n) {
+            free(path);
+            free(name);
+            return -1;
+        }
+        *names = grown_n;
         *cap = next;
     }
-    (*arr)[(*count)++] = path;
+    (*paths)[*count] = path;
+    (*names)[*count] = name;
+    (*count)++;
     return 0;
+}
+
+/* Internet radio entries are stored as their URL. */
+static int
+pl_is_url(const char *s)
+{
+    return strncmp(s, "http://", 7) == 0 || strncmp(s, "https://", 8) == 0;
 }
 
 /* Case-insensitive extension test; mirrors track.c's ext_is without sharing a
@@ -197,14 +223,15 @@ pl_playlist_dir(char *out, size_t outlen, const char *file)
  * caller keeps whatever it had. Blank and '#' lines are ignored, so other
  * players' #EXTINF records cost nothing. */
 static int
-pl_read_m3u(const char *file, char ***out_paths, int *out_count,
-    char *err, size_t errlen)
+pl_read_m3u(const char *file, char ***out_paths, char ***out_names,
+    int *out_count, char *err, size_t errlen)
 {
     FILE *f;
-    char **paths = NULL;
+    char **paths = NULL, **names = NULL;
     int count = 0, cap = 0;
     char base[PL_PATH_MAX];
     char line[PL_PATH_MAX];
+    char *pending = NULL; /* name from the last #EXTINF, for the next entry */
     int ok = 1;
 
     f = fopen(file, "r");
@@ -240,24 +267,64 @@ pl_read_m3u(const char *file, char ***out_paths, int *out_count,
         end = s + strlen(s);
         while (end > s && (end[-1] == ' ' || end[-1] == '\t'))
             *--end = '\0';
-        if (!*s || *s == '#')
+        if (!*s)
             continue;
+        if (*s == '#') {
+            /* #EXTINF:-1,Name labels the entry on the next line. */
+            if (strncmp(s, "#EXTINF:", 8) == 0) {
+                const char *comma = strchr(s, ',');
+
+                free(pending);
+                pending = NULL;
+                if (comma && comma[1]) {
+                    pending = dup_string(comma + 1);
+                    if (!pending) {
+                        if (err && errlen)
+                            snprintf(err, errlen, "out of memory");
+                        ok = 0;
+                        break;
+                    }
+                }
+            }
+            continue;
+        }
 
         {
             char expanded[PL_PATH_MAX];
             char joined[PL_PATH_MAX];
-            char *copy;
+            const char *target;
+            char *copy, *name;
 
-            if (pl_expand_home(expanded, sizeof expanded, s) != 0) {
-                SDL_Log("playlist: cannot expand ~ in %s", s);
-                continue;
+            if (pl_is_url(s)) {
+                /* A stream URL is taken verbatim: no ~ or relative joining. */
+                target = s;
+            } else {
+                if (pl_expand_home(expanded, sizeof expanded, s) != 0) {
+                    SDL_Log("playlist: cannot expand ~ in %s", s);
+                    free(pending);
+                    pending = NULL;
+                    continue;
+                }
+                if (pl_join_path(joined, sizeof joined, base, expanded) != 0) {
+                    SDL_Log("playlist: path too long, skipped");
+                    free(pending);
+                    pending = NULL;
+                    continue;
+                }
+                target = joined;
             }
-            if (pl_join_path(joined, sizeof joined, base, expanded) != 0) {
-                SDL_Log("playlist: path too long, skipped");
-                continue;
+            copy = dup_string(target);
+            if (!copy) {
+                if (err && errlen)
+                    snprintf(err, errlen, "out of memory");
+                ok = 0;
+                break;
             }
-            copy = dup_string(joined);
-            if (!copy || paths_push(&paths, &count, &cap, copy) != 0) {
+            /* entry_push frees both strings on failure, so the name is handed
+             * over before the call; pending is not touched again after this. */
+            name = pending;
+            pending = NULL;
+            if (entry_push(&paths, &names, &count, &cap, copy, name) != 0) {
                 if (err && errlen)
                     snprintf(err, errlen, "out of memory");
                 ok = 0;
@@ -265,6 +332,7 @@ pl_read_m3u(const char *file, char ***out_paths, int *out_count,
             }
         }
     }
+    free(pending);
 
     if (ok && ferror(f)) {
         if (err && errlen)
@@ -274,17 +342,18 @@ pl_read_m3u(const char *file, char ***out_paths, int *out_count,
     fclose(f);
 
     if (!ok) {
-        free_paths(paths, count);
+        free_entries(paths, names, count);
         return -1;
     }
     *out_paths = paths;
+    *out_names = names;
     *out_count = count;
     return 0;
 }
 
 static int
-pl_write_m3u(const char *file, char *const *paths, int count,
-    char *err, size_t errlen)
+pl_write_m3u(const char *file, char *const *paths, char *const *names,
+    int count, char *err, size_t errlen)
 {
     FILE *f = fopen(file, "w");
     int bad = 0;
@@ -297,8 +366,18 @@ pl_write_m3u(const char *file, char *const *paths, int count,
     }
 
     fputs("#EXTM3U\n", f);
-    for (i = 0; i < count; i++)
+    for (i = 0; i < count; i++) {
+        const char *name = names ? names[i] : NULL;
+
+        if (name && *name) {
+            /* A line break in a name would split the record: flatten it. */
+            fputs("#EXTINF:-1,", f);
+            for (; *name; name++)
+                fputc(*name == '\n' || *name == '\r' ? ' ' : *name, f);
+            fputc('\n', f);
+        }
         fprintf(f, "%s\n", paths[i]);
+    }
     if (ferror(f))
         bad = 1;
     if (fflush(f) != 0)
@@ -372,7 +451,7 @@ playlist_autosave(Playlist *pl)
 
     /* Same directory, then rename: a crash mid-write never damages the list. */
     snprintf(tmp, sizeof tmp, "%s.tmp", pl->autosave);
-    if (pl_write_m3u(tmp, pl->paths, pl->count, err, sizeof err) != 0) {
+    if (pl_write_m3u(tmp, pl->paths, pl->names, pl->count, err, sizeof err) != 0) {
         SDL_Log("playlist autosave failed: %s", err);
         remove(tmp);
         return;
@@ -386,20 +465,21 @@ playlist_autosave(Playlist *pl)
 static void
 playlist_restore(Playlist *pl)
 {
-    char **paths = NULL;
+    char **paths = NULL, **names = NULL;
     int count = 0;
     char err[256];
 
     if (!pl->autosave[0] || access(pl->autosave, R_OK) != 0)
         return; /* absent is the normal first-run case */
 
-    if (pl_read_m3u(pl->autosave, &paths, &count, err, sizeof err) != 0) {
+    if (pl_read_m3u(pl->autosave, &paths, &names, &count, err, sizeof err) != 0) {
         SDL_Log("playlist restore failed: %s", err);
         return;
     }
 
-    free_paths(pl->paths, pl->count);
+    free_entries(pl->paths, pl->names, pl->count);
     pl->paths = paths;
+    pl->names = names;
     pl->count = count;
     pl->cap = count;
 }
@@ -424,7 +504,7 @@ playlist_destroy(Playlist *pl)
     if (!pl)
         return;
     playlist_autosave(pl);
-    free_paths(pl->paths, pl->count);
+    free_entries(pl->paths, pl->names, pl->count);
     free(pl);
 }
 
@@ -440,6 +520,17 @@ playlist_path_at(const Playlist *pl, int index)
     if (!pl || index < 0 || index >= pl->count)
         return NULL;
     return pl->paths[index];
+}
+
+const char *
+playlist_label_at(const Playlist *pl, int index)
+{
+    const char *name;
+
+    if (!pl || index < 0 || index >= pl->count || !pl->names)
+        return NULL;
+    name = pl->names[index];
+    return name && *name ? name : NULL;
 }
 
 int
@@ -506,8 +597,13 @@ playlist_prev(Playlist *pl)
     if (!pl || pl->count == 0)
         return -1;
     if (pl->current <= 0) {
-        if (pl->current == 0)
+        if (pl->current == 0) {
+            /* A stream cannot seek: restarting it means reconnecting. Not
+             * playback_get_status, which would consume a pending EOF. */
+            if (playback_is_live())
+                return pl_load(pl, 0, 1);
             return playback_seek(0.0); /* first row restarts the track */
+        }
         return pl_load(pl, 0, 1);
     }
     return pl_load(pl, pl->current - 1, 1);
@@ -524,6 +620,10 @@ playlist_track_finished(Playlist *pl)
     for (i = start; i < pl->count; i++) {
         if (pl_load(pl, i, 0) == 0)
             return;
+        /* A dead stream costs a blocking connect (seconds, on the UI thread),
+         * so one failed station ends the advance rather than trying the rest. */
+        if (pl_is_url(pl->paths[i]))
+            break;
     }
     /* End of the list, or nothing loadable: stay stopped, no wrap. */
 }
@@ -545,6 +645,15 @@ pl_resolve(const char *path, char *resolved)
     if (strchr(path, '\n') || strchr(path, '\r')) {
         SDL_Log("playlist: path contains a newline, skipped");
         return 0;
+    }
+    if (pl_is_url(path)) {
+        /* Stations are not files: no stat or realpath, just the URL. */
+        if (!net_available()) {
+            SDL_Log("playlist: network streams are not available in this build");
+            return 0;
+        }
+        snprintf(resolved, PL_PATH_MAX, "%s", path);
+        return 1;
     }
     if (stat(path, &sb) != 0) {
         SDL_Log("playlist: cannot add %s: %s", path, strerror(errno));
@@ -597,7 +706,8 @@ pl_admit(Playlist *pl, const char *path, int *out_index)
     }
 
     copy = dup_string(resolved);
-    if (!copy || paths_push(&pl->paths, &pl->count, &pl->cap, copy) != 0) {
+    if (!copy || entry_push(&pl->paths, &pl->names, &pl->count, &pl->cap,
+                            copy, NULL) != 0) {
         SDL_Log("playlist: out of memory");
         return 0;
     }
@@ -666,19 +776,21 @@ playlist_add(Playlist *pl, const char *path)
      * entry so a drop or CLI arg still plays, and a known track is restarted
      * the same way. */
     playback_get_status(&st);
-    if (st.state == MP_STOPPED)
+    if (st.state == MP_STOPPED && !st.live_paused)
         playlist_play_index(pl, index);
     return 1;
 }
 
-int
-playlist_add_many(Playlist *pl, const char *const *paths, int n, int *full)
+/* Shared by the file and station batch adds. names may be NULL. */
+static int
+pl_add_batch(Playlist *pl, const char *const *paths, const char *const *names,
+    int n, int *full)
 {
     PlaybackStatus st;
     PathSet set;
     char resolved[PL_PATH_MAX];
     const char **slot;
-    char *copy;
+    char *copy, *label;
     int i, index, added = 0, first = -1, dropped = 0;
 
     if (full)
@@ -705,7 +817,15 @@ playlist_add_many(Playlist *pl, const char *const *paths, int n, int *full)
             continue;
         }
         copy = dup_string(resolved);
-        if (!copy || paths_push(&pl->paths, &pl->count, &pl->cap, copy) != 0) {
+        label = names && names[i] ? dup_string(names[i]) : NULL;
+        if (!copy || (names && names[i] && !label)) {
+            free(copy);
+            free(label);
+            SDL_Log("playlist: out of memory");
+            continue;
+        }
+        if (entry_push(&pl->paths, &pl->names, &pl->count, &pl->cap,
+                       copy, label) != 0) {
             SDL_Log("playlist: out of memory");
             continue;
         }
@@ -728,9 +848,22 @@ playlist_add_many(Playlist *pl, const char *const *paths, int n, int *full)
     /* One autosave for the whole batch, not one per file. */
     playlist_autosave(pl);
     playback_get_status(&st);
-    if (st.state == MP_STOPPED)
+    if (st.state == MP_STOPPED && !st.live_paused)
         playlist_play_index(pl, first);
     return added;
+}
+
+int
+playlist_add_many(Playlist *pl, const char *const *paths, int n, int *full)
+{
+    return pl_add_batch(pl, paths, NULL, n, full);
+}
+
+int
+playlist_add_stations(Playlist *pl, const char *const *urls,
+    const char *const *names, int n, int *full)
+{
+    return pl_add_batch(pl, urls, names, n, full);
 }
 
 void
@@ -743,10 +876,14 @@ playlist_remove_selected(Playlist *pl)
 
     index = pl->selected;
     free(pl->paths[index]);
-    for (i = index; i < pl->count - 1; i++)
+    free(pl->names[index]);
+    for (i = index; i < pl->count - 1; i++) {
         pl->paths[i] = pl->paths[i + 1];
+        pl->names[i] = pl->names[i + 1];
+    }
     pl->count--;
     pl->paths[pl->count] = NULL;
+    pl->names[pl->count] = NULL;
 
     if (pl->current == index) {
         playback_stop();
@@ -771,8 +908,9 @@ playlist_clear(Playlist *pl)
     if (!pl)
         return;
     playback_stop();
-    free_paths(pl->paths, pl->count);
+    free_entries(pl->paths, pl->names, pl->count);
     pl->paths = NULL;
+    pl->names = NULL;
     pl->count = 0;
     pl->cap = 0;
     pl->current = -1;
@@ -797,7 +935,7 @@ playlist_save_as(Playlist *pl, const char *path, char *err, size_t errlen)
             snprintf(err, errlen, "cannot resolve path");
         return -1;
     }
-    if (pl_write_m3u(expanded, pl->paths, pl->count, err, errlen) != 0)
+    if (pl_write_m3u(expanded, pl->paths, pl->names, pl->count, err, errlen) != 0)
         return -1;
 
     /* Save-as never moves the autosave target; it only seeds the prefill. */
@@ -808,7 +946,7 @@ playlist_save_as(Playlist *pl, const char *path, char *err, size_t errlen)
 int
 playlist_load_file(Playlist *pl, const char *path, char *err, size_t errlen)
 {
-    char **paths = NULL;
+    char **paths = NULL, **names = NULL;
     int count = 0;
 
     if (err && errlen)
@@ -818,13 +956,14 @@ playlist_load_file(Playlist *pl, const char *path, char *err, size_t errlen)
             snprintf(err, errlen, "no file name given");
         return -1;
     }
-    if (pl_read_m3u(path, &paths, &count, err, errlen) != 0)
+    if (pl_read_m3u(path, &paths, &names, &count, err, errlen) != 0)
         return -1;
 
     /* The loaded list replaces the queue, so the old current row is gone. */
     playback_stop();
-    free_paths(pl->paths, pl->count);
+    free_entries(pl->paths, pl->names, pl->count);
     pl->paths = paths;
+    pl->names = names;
     pl->count = count;
     pl->cap = count;
     pl->current = -1;

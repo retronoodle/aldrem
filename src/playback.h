@@ -22,7 +22,9 @@ typedef struct {
     int    bits_per_sample; /* decoded width, 0 when not meaningful (MP3) */
     int    sample_rate;    /* source sample rate, Hz */
     int    channels;       /* source channel count */
+    int    is_live;        /* 1 for a network stream: duration 0, no seeking */
     int    finished;       /* 1 on the single status read that consumes EOF */
+    int    live_paused;    /* 1 while a paused live stream sits stopped (Play reconnects) */
 } PlaybackStatus;
 
 int  playback_init(void); /* SDL_OpenAudioDevice, ring alloc */
@@ -55,5 +57,7 @@ void playback_set_volume(int percent);
 /* Adds delta to the volume percentage, clamped to [0, 100]. */
 void playback_adjust_volume(int delta);
 void playback_get_status(PlaybackStatus *out);
+/* Non-consuming: unlike playback_get_status, leaves a pending EOF alone. */
+int  playback_is_live(void);
 
 #endif
