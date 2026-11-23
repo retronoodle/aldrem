@@ -14,7 +14,7 @@ typedef struct {
     int    volume_percent; /* 0..100 */
     char   name[512];      /* loaded path, empty when nothing is loaded */
     char   error[512];     /* last load/start error, empty on success */
-    char   codec[8];       /* decoded format label ("WAV"/"MP3") */
+    char   codec[8];       /* decoded format label ("WAV"/"MP3"/"Vorbis") */
     int    bits_per_sample; /* decoded width, 0 when not meaningful (MP3) */
     int    sample_rate;    /* source sample rate, Hz */
     int    channels;       /* source channel count */

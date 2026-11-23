@@ -1,6 +1,6 @@
 /* file_browser.c — a small modal directory browser built on Nuklear.
  *
- * Lists "..", subdirectories and .wav/.mp3 files in one selectable column.
+ * Lists "..", subdirectories and supported audio files in one selectable column.
  * Double-click (or select + Open) enters a directory or returns the chosen
  * file's absolute path. Click handling is deliberately "return value means
  * clicked": nk_select_label toggles the value passed in, so the stored

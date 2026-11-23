@@ -14,7 +14,7 @@ A minimal desktop audio player for MP3 and WAV files, written in pure C with SDL
 
 - Playlists, library management, or multiple tracks queued.
 - Visualizations, theming, or skins.
-- Formats beyond WAV and MP3 (no FLAC/OGG yet).
+- Formats beyond WAV, MP3, FLAC and Ogg Vorbis (AIFF lands in Phase C; Opus and AAC/ALAC are deferred).
 - Tag editing or metadata display beyond the filename.
 - Windows support (happy accident if it happens, not a requirement).
 

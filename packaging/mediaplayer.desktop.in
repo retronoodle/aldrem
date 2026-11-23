@@ -2,12 +2,12 @@
 Type=Application
 Name=mediaplayer
 GenericName=Audio Player
-Comment=Minimal WAV/MP3 player
+Comment=Minimal WAV/MP3/FLAC/Ogg player
 Exec=@BINDIR@/mediaplayer %f
 Icon=mediaplayer
 Terminal=false
 Categories=AudioVideo;Audio;Player;
-MimeType=audio/mpeg;audio/wav;audio/x-wav;
+MimeType=audio/mpeg;audio/wav;audio/x-wav;audio/flac;audio/ogg;audio/x-vorbis+ogg;
 StartupNotify=true
 StartupWMClass=mediaplayer
-Keywords=audio;music;player;mp3;wav;
+Keywords=audio;music;player;mp3;wav;flac;ogg;vorbis;

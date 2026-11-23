@@ -36,6 +36,8 @@
       <array>
         <string>public.mp3</string>
         <string>com.microsoft.waveform-audio</string>
+        <string>org.xiph.flac</string>
+        <string>org.xiph.ogg-audio</string>
         <string>public.aiff-audio</string>
       </array>
     </dict>

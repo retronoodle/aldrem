@@ -6,7 +6,7 @@
 #include <stdio.h>
 #include <string.h>
 
-enum { SNIFF_UNKNOWN, SNIFF_WAV, SNIFF_MP3, SNIFF_FLAC, SNIFF_IOERR };
+enum { SNIFF_UNKNOWN, SNIFF_WAV, SNIFF_MP3, SNIFF_FLAC, SNIFF_OGG, SNIFF_IOERR };
 
 static const TrackOps *
 ops_of(Track *t)
@@ -70,7 +70,8 @@ track_ext_supported(const char *name)
 {
     if (!name)
         return 0;
-    return ext_is(name, "wav") || ext_is(name, "mp3") || ext_is(name, "flac");
+    return ext_is(name, "wav") || ext_is(name, "mp3") || ext_is(name, "flac")
+        || ext_is(name, "ogg") || ext_is(name, "oga");
 }
 
 /* Reads the first bytes to identify a file whose extension says nothing. */
@@ -95,6 +96,9 @@ sniff(const char *path)
 
     if (n >= 4 && memcmp(buf, "fLaC", 4) == 0)
         return SNIFF_FLAC;
+
+    if (n >= 4 && memcmp(buf, "OggS", 4) == 0)
+        return SNIFF_OGG;
 
     if (n >= 3 && memcmp(buf, "ID3", 3) == 0)
         return SNIFF_MP3;
@@ -127,6 +131,8 @@ track_open(const char *path, TrackInfo *info, char *err, size_t errlen)
         return track_mp3_open(path, info, err, errlen);
     if (ext_is(path, "flac"))
         return track_flac_open(path, info, err, errlen);
+    if (ext_is(path, "ogg") || ext_is(path, "oga"))
+        return track_ogg_open(path, info, err, errlen);
 
     switch (sniff(path)) {
     case SNIFF_WAV:
@@ -135,6 +141,8 @@ track_open(const char *path, TrackInfo *info, char *err, size_t errlen)
         return track_mp3_open(path, info, err, errlen);
     case SNIFF_FLAC:
         return track_flac_open(path, info, err, errlen);
+    case SNIFF_OGG:
+        return track_ogg_open(path, info, err, errlen);
     case SNIFF_IOERR:
         if (err && errlen)
             snprintf(err, errlen, "cannot open '%s'", path);
@@ -142,7 +150,7 @@ track_open(const char *path, TrackInfo *info, char *err, size_t errlen)
     default:
         if (err && errlen)
             snprintf(err, errlen,
-                     "unsupported file type '%s': expected .wav, .mp3 or .flac",
+                     "unsupported file type '%s': expected .wav, .mp3, .flac, .ogg or .oga",
                      path);
         return NULL;
     }

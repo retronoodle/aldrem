@@ -21,5 +21,6 @@ typedef struct {
 Track *track_wav_open(const char *path, TrackInfo *info, char *err, size_t errlen);
 Track *track_mp3_open(const char *path, TrackInfo *info, char *err, size_t errlen);
 Track *track_flac_open(const char *path, TrackInfo *info, char *err, size_t errlen);
+Track *track_ogg_open(const char *path, TrackInfo *info, char *err, size_t errlen);
 
 #endif

@@ -31,4 +31,4 @@ Source repo: https://github.com/nothings/stb — `master`, header self-reports *
 
 - `stb_vorbis.c` — https://raw.githubusercontent.com/nothings/stb/master/stb_vorbis.c
 
-No modifications. Public domain; license statement at the end of the file. Not wired into the build yet — see `docs/PRD-format-support.md` (Phase B).
+No modifications. Public domain; license statement at the end of the file. Wired into the build via `src/track_ogg.c`, compiled as its own TU and decoded to interleaved S16. Limits: mono/stereo only; Ogg Opus/FLAC/Speex are not supported. For chained files, decoding stops at the first logical stream boundary while the length is taken from the file's final page, so duration and playback may be shorter than the first stream.
