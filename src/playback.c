@@ -429,25 +429,24 @@ playback_load(const char *path, char *err, size_t errlen)
         return -1;
     }
 
-    /* Stop the current session before swapping tracks. */
+    /* Open the candidate before touching the live session: a bad file must
+     * leave the current track playing exactly as it was. A slow open (VBR MP3
+     * header scan, whole-file WAV) runs while the old track keeps playing. */
+    t = track_open(path, &info, errbuf, sizeof errbuf);
+    if (!t) {
+        const char *msg = errbuf[0] ? errbuf : "cannot load file";
+
+        set_error(&g, msg);
+        if (err && errlen)
+            snprintf(err, errlen, "%s", msg);
+        return -1;
+    }
+
+    /* Only now stop and replace the live session. */
     stop_session(&g);
     if (g.track) {
         track_close(g.track);
         g.track = NULL;
-    }
-
-    t = track_open(path, &info, errbuf, sizeof errbuf);
-    if (!t) {
-        SDL_LockMutex(g.meta_mutex);
-        g.has_track = 0;
-        g.duration = 0.0;
-        g.name[0] = '\0';
-        snprintf(g.error, sizeof g.error, "%s",
-                 errbuf[0] ? errbuf : "cannot load file");
-        SDL_UnlockMutex(g.meta_mutex);
-        if (err && errlen)
-            snprintf(err, errlen, "%s", errbuf);
-        return -1;
     }
 
     g.track = t;

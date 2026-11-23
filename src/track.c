@@ -65,6 +65,14 @@ ext_is(const char *path, const char *ext)
     return dot[i + 1] == '\0';
 }
 
+int
+track_ext_supported(const char *name)
+{
+    if (!name)
+        return 0;
+    return ext_is(name, "wav") || ext_is(name, "mp3");
+}
+
 /* Reads the first bytes to identify a file whose extension says nothing. */
 static int
 sniff(const char *path)

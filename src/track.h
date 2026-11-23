@@ -19,6 +19,10 @@ typedef struct {
  * human-readable reason in err. */
 Track *track_open(const char *path, TrackInfo *info, char *err, size_t errlen);
 
+/* Nonzero when name carries a supported audio extension. The single source of
+ * truth for extension-based filtering, shared by the loader and the browser. */
+int track_ext_supported(const char *name);
+
 /* Copies the next chunk of source-format PCM into dst (max cap bytes).
  * Returns bytes written (always a whole number of frames), 0 at end of
  * stream, -1 on error. Advances the cursor. */

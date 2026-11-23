@@ -1,7 +1,7 @@
-/* mediaplayer — Phase 3: seeking and accurate position on top of the Phase 2
- * WAV engine and Phase 1 layout. Open (inert) + status, a previewing time
- * label, a click/drag seek bar, transport buttons and a disabled volume
- * slider. Arrow keys seek ±5 s. Esc quits (raw SDL event).
+/* mediaplayer — Phase 5: drag-and-drop and an in-app directory browser for
+ * loading tracks, on top of the Phase 4 WAV/MP3 engine. A failed load keeps
+ * the current track playing and shows the reason in the status label.
+ * Arrow keys seek ±5 s; Esc closes the browser or quits (raw SDL events).
  */
 #include <math.h>
 #include <stdio.h>
@@ -9,17 +9,12 @@
 
 #include <SDL.h>
 
-#define NK_INCLUDE_FIXED_TYPES
-#define NK_INCLUDE_DEFAULT_ALLOCATOR
-#define NK_INCLUDE_VERTEX_BUFFER_OUTPUT
-#define NK_INCLUDE_FONT_BAKING
-#define NK_INCLUDE_DEFAULT_FONT
-#define NK_INCLUDE_STANDARD_VARARGS
 #define NK_IMPLEMENTATION
-#include "nuklear.h"
+#include "nuklear_config.h"
 #define NK_SDL_RENDERER_IMPLEMENTATION
 #include "nuklear_sdl_renderer.h"
 
+#include "file_browser.h"
 #include "playback.h"
 
 #define UI_DENSITY 0.8f
@@ -258,6 +253,10 @@ main(int argc, char **argv)
     if (playback_init() != 0)
         SDL_Log("playback_init failed: %s", SDL_GetError());
 
+    FileBrowser *browser = file_browser_create();
+    if (!browser)
+        SDL_Log("file browser allocation failed; Open is disabled");
+
     if (argc > 1) {
         char err[256];
         if (playback_load(argv[1], err, sizeof err) != 0)
@@ -268,6 +267,9 @@ main(int argc, char **argv)
     int seek_dragging = 0;
     float seek_preview = 0.0f;
     double pending_seek = 0.0;
+    char pending_drop[4096];
+    int has_pending_drop = 0;
+    char window_title[640] = "";
 
     while (running) {
         /* Derive sizes fresh each frame: the resize event values are points,
@@ -286,15 +288,31 @@ main(int argc, char **argv)
         while (SDL_PollEvent(&evt)) {
             if (evt.type == SDL_QUIT) {
                 running = 0;
-            } else if (evt.type == SDL_KEYDOWN &&
+            } else if (evt.type == SDL_DROPFILE) {
+                /* SDL owns the path string: free every one, including the
+                 * extras when a multi-file selection arrives in one batch. */
+                if (evt.drop.file) {
+                    if (!has_pending_drop) {
+                        snprintf(pending_drop, sizeof pending_drop, "%s",
+                                 evt.drop.file);
+                        has_pending_drop = 1;
+                    }
+                    SDL_free(evt.drop.file);
+                }
+            } else if (evt.type == SDL_KEYDOWN && !evt.key.repeat &&
                        evt.key.keysym.scancode == SDL_SCANCODE_ESCAPE) {
-                running = 0;
+                if (file_browser_is_open(browser))
+                    file_browser_close(browser);
+                else
+                    running = 0;
             } else if (evt.type == SDL_KEYDOWN &&
                        evt.key.keysym.scancode == SDL_SCANCODE_LEFT) {
-                pending_seek -= 5.0;
+                if (!file_browser_is_open(browser))
+                    pending_seek -= 5.0;
             } else if (evt.type == SDL_KEYDOWN &&
                        evt.key.keysym.scancode == SDL_SCANCODE_RIGHT) {
-                pending_seek += 5.0;
+                if (!file_browser_is_open(browser))
+                    pending_seek += 5.0;
             } else if (evt.type == SDL_WINDOWEVENT &&
                        (evt.window.event == SDL_WINDOWEVENT_RESIZED ||
                         evt.window.event == SDL_WINDOWEVENT_SIZE_CHANGED ||
@@ -309,12 +327,27 @@ main(int argc, char **argv)
         }
         nk_input_end(ctx);
 
+        /* A drop supersedes the browser; both funnel into playback_load. */
+        if (has_pending_drop) {
+            char err[256];
+
+            has_pending_drop = 0;
+            file_browser_close(browser);
+            if (playback_load(pending_drop, err, sizeof err) != 0)
+                SDL_Log("playback_load failed: %s", err);
+        }
+
         PlaybackStatus st;
         char timebuf[64];
         char volbuf[32];
+        char title[640];
         const char *status_text;
+        const char *base;
         float progress, volume;
         double shown;
+        int browser_open;
+
+        browser_open = file_browser_is_open(browser);
 
         /* Coalesce arrow-key repeats into one decoder rebuild per frame; this
          * runs before the status fetch so the label reflects the new position
@@ -359,25 +392,46 @@ main(int argc, char **argv)
         volume = (float)st.volume_percent / 100.0f;
         snprintf(volbuf, sizeof volbuf, "vol %d", st.volume_percent);
 
+        base = "";
+        if (st.has_track) {
+            const char *slash = strrchr(st.name, '/');
+            base = slash ? slash + 1 : st.name;
+        }
+
         if (st.error[0]) {
             status_text = st.error;
-        } else if (st.has_track) {
-            const char *slash = strrchr(st.name, '/');
-            status_text = slash ? slash + 1 : st.name;
+        } else if (base[0]) {
+            status_text = base;
         } else {
             status_text = "no file loaded";
+        }
+
+        /* The OS renders the title, so the em dash is safe here (the default
+         * Nuklear font has no glyph for it). Only update on change. */
+        if (base[0])
+            snprintf(title, sizeof title, "%s — mediaplayer", base);
+        else
+            snprintf(title, sizeof title, "mediaplayer");
+        if (strcmp(title, window_title) != 0) {
+            SDL_SetWindowTitle(win, title);
+            snprintf(window_title, sizeof window_title, "%s", title);
         }
 
         if (nk_begin(ctx, "mediaplayer",
                      nk_rect(0, 0, (float)px_w, (float)px_h),
                      NK_WINDOW_NO_SCROLLBAR))
         {
-            /* row 1: Open button (fixed; file dialog is a later phase) + status */
+            /* row 1: Open button + status; inert while the browser is up */
             nk_layout_row_template_begin(ctx, ui_s(30.0f, ui_scale));
             nk_layout_row_template_push_static(ctx, ui_s(90.0f, ui_scale));
             nk_layout_row_template_push_dynamic(ctx);
             nk_layout_row_template_end(ctx);
-            nk_button_label(ctx, "Open");
+            if (!browser || browser_open)
+                nk_widget_disable_begin(ctx);
+            if (nk_button_label(ctx, "Open"))
+                file_browser_open(browser, st.has_track ? st.name : NULL);
+            if (!browser || browser_open)
+                nk_widget_disable_end(ctx);
             nk_label(ctx, status_text, NK_TEXT_LEFT);
 
             /* row 2: time label, centered */
@@ -386,14 +440,15 @@ main(int argc, char **argv)
 
             /* row 3: seek bar — click or drag to seek, released on mouse up */
             nk_layout_row_dynamic(ctx, ui_s(35.0f, ui_scale), 1);
-            if (ui_seek_bar(ctx, ui_scale, progress, st.has_track,
+            if (ui_seek_bar(ctx, ui_scale, progress,
+                            st.has_track && !browser_open,
                             &seek_dragging, &seek_preview)) {
                 playback_seek((double)seek_preview * st.duration);
             }
 
-            /* row 4: transport buttons, disabled until a track is loaded */
+            /* row 4: transport buttons, disabled with no track or a dialog */
             nk_layout_row_dynamic(ctx, ui_s(35.0f, ui_scale), 3);
-            if (!st.has_track)
+            if (!st.has_track || browser_open)
                 nk_widget_disable_begin(ctx);
             if (nk_button_label(ctx, "Play"))
                 playback_play();
@@ -401,7 +456,7 @@ main(int argc, char **argv)
                 playback_pause();
             if (nk_button_label(ctx, "Stop"))
                 playback_stop();
-            if (!st.has_track)
+            if (!st.has_track || browser_open)
                 nk_widget_disable_end(ctx);
 
             /* row 5: volume label + slider, disabled (Phase 6 wires it) */
@@ -416,6 +471,20 @@ main(int argc, char **argv)
         }
         nk_end(ctx);
 
+        /* Drawn as a second window after the main layout, which is what makes
+         * "disable the main controls while open" sufficient to stop clicks
+         * leaking through to the seek bar and transport. */
+        if (browser_open && browser) {
+            char chosen[4096];
+            char err[256];
+
+            if (file_browser_draw(browser, ctx, ui_scale, (float)px_w,
+                                  (float)px_h, chosen, sizeof chosen) == 1) {
+                if (playback_load(chosen, err, sizeof err) != 0)
+                    SDL_Log("playback_load failed: %s", err);
+            }
+        }
+
         SDL_SetRenderDrawColor(ren, 24, 24, 28, 255);
         SDL_RenderClear(ren);
         nk_sdl_render(NK_ANTI_ALIASING_ON);
@@ -424,6 +493,7 @@ main(int argc, char **argv)
 
     /* Join the decoder thread and close the device before tearing down
      * SDL/Nuklear; otherwise macOS complains about an open audio device. */
+    file_browser_destroy(browser);
     playback_shutdown();
     nk_sdl_shutdown();
     SDL_DestroyRenderer(ren);

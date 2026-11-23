@@ -19,9 +19,10 @@ typedef struct {
 int  playback_init(void); /* SDL_OpenAudioDevice, ring alloc */
 void playback_shutdown(void);
 
-/* Stops any current session, opens path and starts playing it.
- * Returns 0 on success; on failure writes a human-readable reason into err
- * and leaves the engine stopped with no track loaded. */
+/* Opens path and, on success, replaces any current session with it and starts
+ * playing from the beginning. Returns 0 on success. On failure writes a
+ * human-readable reason into err, reports it through PlaybackStatus.error, and
+ * leaves any current playback untouched. */
 int  playback_load(const char *path, char *err, size_t errlen);
 
 void playback_play(void);
