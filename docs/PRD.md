@@ -12,7 +12,7 @@ A minimal desktop audio player for MP3 and WAV files, written in pure C with SDL
 
 ## Non-goals
 
-- Playlists, library management, or multiple tracks queued.
+- Library management, a named-playlist library, repeat/shuffle, or reordering the queue.
 - Visualizations, theming, or skins.
 - Formats beyond WAV, MP3, FLAC, Ogg Vorbis and AIFF (Opus and AAC/ALAC are deferred).
 - Tag editing or metadata display beyond the filename.
@@ -54,10 +54,11 @@ Prerequisite: `brew install sdl2`. Nuklear and minimp3 are vendored into `vendor
 - **Decoder thread** refills the ring buffer ahead of playback; the audio callback only ever reads from the ring buffer and applies volume.
 - **Shared state** (position, state, filename, duration) behind one mutex; UI reads it every frame, engine writes it from callback/thread.
 - **Track abstraction** (`track_open`, `track_decode_chunk`, `track_seek`, `track_close`) so WAV and MP3 are interchangeable behind one interface. WAV implementation = read whole file into memory via `SDL_LoadWAV`. MP3 implementation = minimp3 streaming decode.
+- **Playlist** (`playlist.c`) owns the queue, its `.m3u` reader/writer and the playback transitions that follow from editing it. It autosaves the live list to `$XDG_CONFIG_HOME/cside-mediaplayer/playlist.m3u` on every mutation and on quit, and restores it at launch before the first frame.
 
 ## Functional requirements
 
-1. Opening a file (drag-and-drop or Open button) stops current playback and starts the new track from 0:00.
+1. Opening a file (drag-and-drop or Open button) appends it to the playlist; it starts playing when the player is idle and never interrupts an active or paused track.
 2. Play/pause toggles without a gap or glitch; stop resets position to 0 and unload state to STOPPED.
 3. Seeking: drag the progress slider; playback continues from the new position when released.
 4. Time display shows `current / total` in `m:ss`.
@@ -159,6 +160,20 @@ Each phase is a self-contained feature sized for one AI work session. Build them
 - End-to-end pass: long-file memory stability (watch RSS while looping a 1-hour file for a few minutes), quit-during-playback cleanliness, resize-while-playing.
 
 **Done when:** All 9 functional requirements demonstrably pass; a 15-minute manual session (load, seek around, pause, switch files, quit) hits zero errors or warnings.
+
+## Phase 7 — Playlist, persistence and auto-advance
+
+**Goal:** A queue that fills as you add files, survives a restart, and saves/loads as `.m3u`.
+
+**Tasks**
+- Playlist model (`playlist.c`): growable absolute-path list, current/selected rows, Remove and Clear; a hard cap and duplicate/missing entries tolerated.
+- `.m3u`/`.m3u8` reader and writer: `#EXTM3U` header, skip blank/`#` lines, `~` expansion, paths relative to the list resolved against the list's own directory.
+- Atomic autosave to the XDG config dir on every mutation and on quit; restore at launch without playing.
+- Panel under the player: heading, `Open list` / `Save as` / `Remove` / `Clear` toolbar, scrolling rows with double-click to play, and a centred Save-as dialog.
+- Prev/Next in the transport row; auto-advance at EOF, skipping unloadable entries and stopping at the end of the list.
+- Multi-file drops append every file in arrival order; the browser gets a playlist mode for listing `.m3u` files.
+
+**Done when:** A list built from drops and `Open` survives quit/relaunch in order; Save as then Open list reproduces it; a hand-written `.m3u` with `#EXTINF` and relative paths loads correctly; a deleted file shows an error when double-clicked and is skipped by auto-advance.
 
 ---
 

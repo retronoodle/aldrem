@@ -4,11 +4,12 @@ LDLIBS  := $(shell pkg-config --libs sdl2) -lm
 
 SRC := src/main.c src/playback.c src/track.c src/track_wav.c src/track_mp3.c \
        src/track_flac.c src/track_ogg.c src/track_aiff.c src/file_browser.c \
-       vendor/stb_vorbis.c
+       src/playlist.c vendor/stb_vorbis.c
 OBJ := $(SRC:.c=.o)
 HDR := src/playback.h src/track.h src/track_internal.h src/file_browser.h \
-       src/nuklear_config.h vendor/nuklear.h vendor/nuklear_sdl_renderer.h \
-       vendor/minimp3.h vendor/dr_flac.h vendor/stb_vorbis.c
+       src/playlist.h src/nuklear_config.h vendor/nuklear.h \
+       vendor/nuklear_sdl_renderer.h vendor/minimp3.h vendor/dr_flac.h \
+       vendor/stb_vorbis.c
 
 PREFIX   ?= $(HOME)/.local
 BINDIR   ?= $(PREFIX)/bin

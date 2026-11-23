@@ -40,6 +40,8 @@ struct FileBrowser {
     int count;
     int selected;
     char error[256];
+    fb_filter_fn filter; /* NULL = supported audio files */
+    char title[64];
     int last_click;
     Uint32 last_click_ms;
     /* Incremental scan: a bounded slice per frame, results staged so the
@@ -192,7 +194,8 @@ fb_advance_scan(FileBrowser *fb)
         if (!is_dir) {
             if (!S_ISREG(sb.st_mode))
                 continue;
-            if (!track_ext_supported(de->d_name))
+            if (fb->filter ? !fb->filter(de->d_name)
+                           : !track_ext_supported(de->d_name))
                 continue;
         }
 
@@ -244,11 +247,20 @@ file_browser_is_open(const FileBrowser *fb)
 void
 file_browser_open(FileBrowser *fb, const char *suggested_path)
 {
+    file_browser_open_for(fb, suggested_path, track_ext_supported, "Open file");
+}
+
+void
+file_browser_open_for(FileBrowser *fb, const char *suggested_path,
+    fb_filter_fn filter, const char *title)
+{
     char cwd[FB_PATH_MAX];
 
     if (!fb)
         return;
     fb->open = 1;
+    fb->filter = filter;
+    snprintf(fb->title, sizeof fb->title, "%s", title ? title : "Open file");
 
     if (fb->has_last_dir) {
         if (fb_begin_scan(fb, fb->last_dir) == 0)
@@ -331,7 +343,7 @@ file_browser_draw(FileBrowser *fb, struct nk_context *ctx, float scale,
                      lroundf((screen_h - h) * 0.5f),
                      lroundf(w), lroundf(h));
 
-    if (nk_begin(ctx, "Open file", bounds,
+    if (nk_begin(ctx, fb->title[0] ? fb->title : "Open file", bounds,
                  NK_WINDOW_BORDER | NK_WINDOW_TITLE | NK_WINDOW_MOVABLE |
                  NK_WINDOW_NO_SCROLLBAR)) {
         int activate = -1;

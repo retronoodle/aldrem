@@ -613,9 +613,12 @@ playback_get_status(PlaybackStatus *out)
     if (!g.inited)
         return;
 
-    /* EOF is handled here, on the UI thread, exactly once. */
-    if (SDL_AtomicGet(&g.eof))
+    /* EOF is handled here, on the UI thread, exactly once. stop_session clears
+     * the atomic, which makes this flag inherently one-shot. */
+    if (SDL_AtomicGet(&g.eof)) {
         stop_session(&g);
+        out->finished = 1;
+    }
 
     out->state = (PlaybackState)SDL_AtomicGet(&g.state);
     out->position = current_position(&g);

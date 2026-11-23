@@ -1,12 +1,13 @@
-/* mediaplayer — Phase 6: volume control, global Space/up/down shortcuts, an
- * idle hint in the seek row, and a status label that surfaces the decoded
- * format. Drag-and-drop, the in-app browser, WAV/MP3/FLAC/Ogg Vorbis/AIFF
- * playback, seeking (arrows) and Esc (close browser or quit) from earlier
- * phases are unchanged.
+/* mediaplayer — Phase 7: a playlist panel under the player. Drops, Open and
+ * multi-select drops append to it, it survives a restart via autosave under the
+ * XDG config dir, and it saves to / loads from .m3u. Auto-advance is on; the
+ * player rows, global shortcuts, browser and decoders are otherwise unchanged.
  */
 #include <math.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 
 #include <SDL.h>
 
@@ -17,6 +18,8 @@
 
 #include "file_browser.h"
 #include "playback.h"
+#include "playlist.h"
+#include "track.h"
 
 #define UI_DENSITY 0.8f
 #define UI_FONT_BASE 19.0f
@@ -192,6 +195,277 @@ ui_seek_bar(struct nk_context *ctx, float s, float frac,
     return released;
 }
 
+/* Last path component; the playlist shows basenames, not full paths. */
+static const char *
+ui_base_name(const char *path)
+{
+    const char *slash;
+
+    if (!path)
+        return "";
+    slash = strrchr(path, '/');
+    return slash ? slash + 1 : path;
+}
+
+/* SDL frees evt.drop.file when the event is done, so each path is copied.
+ * Drops arrive one event per file; this keeps them together for one batch. */
+static int
+ui_drop_push(char ***queue, int *count, int *cap, const char *path)
+{
+    char *copy;
+    size_t n = strlen(path) + 1;
+
+    if (*count >= *cap) {
+        int next = *cap ? *cap * 2 : 8;
+        char **grown = (char **)realloc(*queue, sizeof *grown * (size_t)next);
+
+        if (!grown)
+            return -1;
+        *queue = grown;
+        *cap = next;
+    }
+    copy = (char *)malloc(n);
+    if (!copy)
+        return -1;
+    memcpy(copy, path, n);
+    (*queue)[(*count)++] = copy;
+    return 0;
+}
+
+static void
+ui_drop_free_all(char **queue, int count)
+{
+    int i;
+
+    for (i = 0; i < count; i++)
+        free(queue[i]);
+    free(queue);
+}
+
+/* Save-as prefill: the session's last list path, else $HOME/Music/playlist.m3u
+ * when that directory exists, else $HOME/playlist.m3u. */
+static void
+ui_save_path_default(char *out, size_t outlen)
+{
+    const char *last = playlist_last_file();
+    const char *home = getenv("HOME");
+    char probe[4096];
+    struct stat sb;
+
+    if (last && last[0]) {
+        snprintf(out, outlen, "%s", last);
+        return;
+    }
+    if (!home || !home[0]) {
+        snprintf(out, outlen, "playlist.m3u");
+        return;
+    }
+    snprintf(probe, sizeof probe, "%s/Music", home);
+    if (stat(probe, &sb) == 0 && S_ISDIR(sb.st_mode))
+        snprintf(out, outlen, "%s/Music/playlist.m3u", home);
+    else
+        snprintf(out, outlen, "%s/playlist.m3u", home);
+}
+
+#define PL_ROW_H           24.0f
+#define PL_DOUBLE_CLICK_MS 400
+
+enum {
+    PL_ACTION_NONE      = 0,
+    PL_ACTION_OPEN_LIST = 1 << 0,
+    PL_ACTION_SAVE_AS   = 1 << 1
+};
+
+/* The whole playlist band: heading, toolbar, scrolling rows. Returns toolbar
+ * actions whose consequences live in main() (browser/modal state). Remove,
+ * Clear and double-click are applied after the row loop so the array that
+ * nk_list_view indexed cannot change mid-draw.
+ *
+ * Deliberately one function: issue #3 will move this panel under a tab without
+ * touching the layout maths. */
+static int
+ui_playlist_panel(Playlist *pl, struct nk_context *ctx, float scale,
+    int disabled)
+{
+    static int last_click = -1;
+    static Uint32 last_click_ms = 0;
+
+    char header[64];
+    float row_h = ui_s(PL_ROW_H, scale);
+    float bar_h = ui_s(28.0f, scale);
+    int count = playlist_count(pl);
+    int current = playlist_current(pl);
+    int selected = playlist_selected(pl);
+    int activate = -1;
+    int want_remove = 0, want_clear = 0;
+    int actions = PL_ACTION_NONE;
+
+    if (count > 0)
+        snprintf(header, sizeof header, "Playlist - %d track%s",
+                 count, count == 1 ? "" : "s");
+    else
+        snprintf(header, sizeof header, "Playlist - empty");
+
+    nk_layout_row_dynamic(ctx, bar_h, 1);
+    nk_label(ctx, header, NK_TEXT_LEFT);
+
+    nk_layout_row_dynamic(ctx, bar_h, 4);
+    if (disabled)
+        nk_widget_disable_begin(ctx);
+    if (nk_button_label(ctx, "Open list"))
+        actions |= PL_ACTION_OPEN_LIST;
+    if (nk_button_label(ctx, "Save as"))
+        actions |= PL_ACTION_SAVE_AS;
+    if (disabled)
+        nk_widget_disable_end(ctx);
+
+    if (disabled || selected < 0)
+        nk_widget_disable_begin(ctx);
+    if (nk_button_label(ctx, "Remove"))
+        want_remove = 1;
+    if (disabled || selected < 0)
+        nk_widget_disable_end(ctx);
+
+    if (disabled || count == 0)
+        nk_widget_disable_begin(ctx);
+    if (nk_button_label(ctx, "Clear"))
+        want_clear = 1;
+    if (disabled || count == 0)
+        nk_widget_disable_end(ctx);
+
+    if (count == 0) {
+        nk_layout_row_dynamic(ctx, row_h, 1);
+        nk_label(ctx, "empty - drop audio files here to add them",
+                 NK_TEXT_LEFT);
+    } else {
+        struct nk_list_view view;
+        struct nk_rect content = nk_window_get_content_region(ctx);
+        struct nk_rect last = nk_layout_widget_bounds(ctx);
+        float list_h = (content.y + content.h) - (last.y + last.h)
+            - ui_s(4.0f, scale);
+
+        if (list_h < 3.0f * row_h)
+            list_h = 3.0f * row_h;
+        nk_layout_row_dynamic(ctx, list_h, 1);
+
+        if (disabled)
+            nk_widget_disable_begin(ctx);
+        if (nk_list_view_begin(ctx, &view, "tracks",
+                               NK_WINDOW_BORDER, (int)row_h, count)) {
+            int i;
+
+            nk_layout_row_dynamic(ctx, row_h, 1);
+            for (i = view.begin; i < view.end; i++) {
+                const char *base = ui_base_name(playlist_path_at(pl, i));
+                char text[4100];
+
+                /* ">" marks the playing row: the default Nuklear font has no
+                 * glyph for a play triangle. */
+                if (i == current)
+                    snprintf(text, sizeof text, "> %s", base);
+                else
+                    snprintf(text, sizeof text, "%s", base);
+
+                /* Nonzero return means clicked; the value is only a render
+                 * flag, so the truth stays in the Playlist struct. */
+                if (nk_select_label(ctx, text, NK_TEXT_LEFT, i == selected)) {
+                    Uint32 now = SDL_GetTicks();
+
+                    if (last_click == i &&
+                        now - last_click_ms < PL_DOUBLE_CLICK_MS) {
+                        activate = i;
+                        last_click = -1;
+                    } else {
+                        playlist_select(pl, i);
+                        last_click = i;
+                        last_click_ms = now;
+                    }
+                }
+            }
+            nk_list_view_end(&view);
+        }
+        if (disabled)
+            nk_widget_disable_end(ctx);
+    }
+
+    /* Deferred mutations: the row loop above indexed this list this frame. */
+    if (activate >= 0)
+        playlist_play_index(pl, activate);
+    if (want_remove) {
+        playlist_remove_selected(pl);
+        last_click = -1;
+    }
+    if (want_clear) {
+        playlist_clear(pl);
+        last_click = -1;
+    }
+    return actions;
+}
+
+/* Small centred Save-as dialog. Returns 1 while it should stay open. Enter (in
+ * the field) and Save both write; a failure keeps the dialog and its error up.
+ * Esc is handled in the event loop, before the browser/quit fallbacks. */
+static int
+ui_save_modal(struct nk_context *ctx, float scale, float screen_w,
+    float screen_h, Playlist *pl, char *path, size_t pathlen,
+    char *err, size_t errlen, int *focus)
+{
+    struct nk_rect bounds;
+    float margin = ui_s(40.0f, scale);
+    float w = ui_s(560.0f, scale);
+    float h = ui_s(200.0f, scale);
+    float row_h = ui_s(28.0f, scale);
+    int keep = 1;
+
+    if (w > screen_w - 2.0f * margin)
+        w = screen_w - 2.0f * margin;
+    if (h > screen_h - 2.0f * margin)
+        h = screen_h - 2.0f * margin;
+    if (w < 1.0f)
+        w = screen_w;
+    if (h < 1.0f)
+        h = screen_h;
+    bounds = nk_rect(lroundf((screen_w - w) * 0.5f),
+                     lroundf((screen_h - h) * 0.5f),
+                     lroundf(w), lroundf(h));
+
+    if (nk_begin(ctx, "Save playlist", bounds,
+                 NK_WINDOW_BORDER | NK_WINDOW_TITLE | NK_WINDOW_NO_SCROLLBAR)) {
+        nk_flags evt;
+        int do_save = 0;
+
+        nk_layout_row_dynamic(ctx, row_h, 1);
+        nk_label(ctx, "Save the playlist as an .m3u file:", NK_TEXT_LEFT);
+
+        if (*focus) {
+            nk_edit_focus(ctx, 0);
+            *focus = 0;
+        }
+        nk_layout_row_dynamic(ctx, row_h, 1);
+        evt = nk_edit_string_zero_terminated(ctx,
+            NK_EDIT_FIELD | NK_EDIT_SIG_ENTER, path, (int)pathlen,
+            nk_filter_default);
+        if (evt & NK_EDIT_COMMITED)
+            do_save = 1;
+
+        if (err[0]) {
+            nk_layout_row_dynamic(ctx, row_h, 1);
+            nk_label(ctx, err, NK_TEXT_LEFT);
+        }
+
+        nk_layout_row_dynamic(ctx, row_h, 2);
+        if (nk_button_label(ctx, "Save"))
+            do_save = 1;
+        if (nk_button_label(ctx, "Cancel"))
+            keep = 0;
+
+        if (do_save && playlist_save_as(pl, path, err, errlen) == 0)
+            keep = 0;
+    }
+    nk_end(ctx);
+    return keep;
+}
+
 int
 main(int argc, char **argv)
 {
@@ -209,7 +483,7 @@ main(int argc, char **argv)
         SDL_Log("SDL audio init failed: %s", SDL_GetError());
 
     SDL_Window *win = SDL_CreateWindow(APP_DISPLAY_NAME,
-        SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, 900, 520,
+        SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, 900, 640,
         SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI);
     if (!win) {
         SDL_Log("SDL_CreateWindow failed: %s", SDL_GetError());
@@ -269,19 +543,31 @@ main(int argc, char **argv)
     if (!browser)
         SDL_Log("file browser allocation failed; Open is disabled");
 
+    /* Restores the autosaved queue (never plays) before anything is added. */
+    Playlist *pl = playlist_create();
+    if (!pl)
+        SDL_Log("playlist allocation failed; the queue is disabled");
+
     if (argc > 1) {
-        char err[256];
-        if (playback_load(argv[1], err, sizeof err) != 0)
-            SDL_Log("playback_load failed: %s", err);
+        /* Appending is the load path now; it autoplays because the player is
+         * idle, and the entry stays in the list. */
+        if (!playlist_add(pl, argv[1]))
+            SDL_Log("cannot add %s to the playlist", argv[1]);
     }
 
     int running = 1;
     int seek_dragging = 0;
     float seek_preview = 0.0f;
     double pending_seek = 0.0;
-    char pending_drop[4096];
-    int has_pending_drop = 0;
     char window_title[640] = "";
+    char **drops = NULL;
+    int drop_count = 0, drop_cap = 0;
+    int browser_list_mode = 0;
+    int modal_active = 0;
+    int save_modal_open = 0;
+    int save_focus = 0;
+    char save_path[4096] = "";
+    char save_err[256] = "";
 
     while (running) {
         /* Derive sizes fresh each frame: the resize event values are points,
@@ -300,51 +586,53 @@ main(int argc, char **argv)
         while (SDL_PollEvent(&evt)) {
             int consumed = 0;
 
+            /* Recomputed per event: Esc can close a modal mid-batch. */
+            modal_active = save_modal_open || file_browser_is_open(browser);
+
             if (evt.type == SDL_QUIT) {
                 running = 0;
             } else if (evt.type == SDL_DROPFILE) {
-                /* SDL owns the path string: free every one, including the
-                 * extras when a multi-file selection arrives in one batch. */
+                /* SDL owns the path string: copy each one, then free it. */
                 if (evt.drop.file) {
-                    if (!has_pending_drop) {
-                        snprintf(pending_drop, sizeof pending_drop, "%s",
-                                 evt.drop.file);
-                        has_pending_drop = 1;
-                    }
+                    if (ui_drop_push(&drops, &drop_count, &drop_cap,
+                                     evt.drop.file) != 0)
+                        SDL_Log("drop queue allocation failed; file skipped");
                     SDL_free(evt.drop.file);
                 }
             } else if (evt.type == SDL_KEYDOWN && !evt.key.repeat &&
                        evt.key.keysym.scancode == SDL_SCANCODE_ESCAPE) {
-                if (file_browser_is_open(browser))
+                /* Esc closes the newest modal first, then the browser, then
+                 * the window. */
+                if (save_modal_open) {
+                    save_modal_open = 0;
+                    SDL_StopTextInput();
+                } else if (file_browser_is_open(browser))
                     file_browser_close(browser);
                 else
                     running = 0;
-            } else if (evt.type == SDL_KEYDOWN &&
+            } else if (!modal_active && evt.type == SDL_KEYDOWN &&
                        evt.key.keysym.scancode == SDL_SCANCODE_LEFT) {
-                if (!file_browser_is_open(browser))
-                    pending_seek -= 5.0;
-            } else if (evt.type == SDL_KEYDOWN &&
+                pending_seek -= 5.0;
+            } else if (!modal_active && evt.type == SDL_KEYDOWN &&
                        evt.key.keysym.scancode == SDL_SCANCODE_RIGHT) {
-                if (!file_browser_is_open(browser))
-                    pending_seek += 5.0;
-            } else if (evt.type == SDL_KEYDOWN &&
+                pending_seek += 5.0;
+            } else if (!modal_active && evt.type == SDL_KEYDOWN &&
                        evt.key.keysym.scancode == SDL_SCANCODE_SPACE) {
                 /* Space/up/down are global: consumed so Nuklear never sees
                  * them. Space toggles once per press; up/down repeat so a held
-                 * key ramps the volume. */
+                 * key ramps the volume. A text field needs these keys, so the
+                 * modal gate above skips the whole block. */
                 consumed = 1;
-                if (!evt.key.repeat && !file_browser_is_open(browser))
+                if (!evt.key.repeat)
                     playback_toggle();
-            } else if (evt.type == SDL_KEYDOWN &&
+            } else if (!modal_active && evt.type == SDL_KEYDOWN &&
                        evt.key.keysym.scancode == SDL_SCANCODE_UP) {
                 consumed = 1;
-                if (!file_browser_is_open(browser))
-                    playback_adjust_volume(5);
-            } else if (evt.type == SDL_KEYDOWN &&
+                playback_adjust_volume(5);
+            } else if (!modal_active && evt.type == SDL_KEYDOWN &&
                        evt.key.keysym.scancode == SDL_SCANCODE_DOWN) {
                 consumed = 1;
-                if (!file_browser_is_open(browser))
-                    playback_adjust_volume(-5);
+                playback_adjust_volume(-5);
             } else if (evt.type == SDL_WINDOWEVENT &&
                        (evt.window.event == SDL_WINDOWEVENT_RESIZED ||
                         evt.window.event == SDL_WINDOWEVENT_SIZE_CHANGED ||
@@ -360,14 +648,17 @@ main(int argc, char **argv)
         }
         nk_input_end(ctx);
 
-        /* A drop supersedes the browser; both funnel into playback_load. */
-        if (has_pending_drop) {
-            char err[256];
+        /* A drop supersedes the browser and appends in arrival order. */
+        if (drop_count > 0) {
+            int i;
 
-            has_pending_drop = 0;
             file_browser_close(browser);
-            if (playback_load(pending_drop, err, sizeof err) != 0)
-                SDL_Log("playback_load failed: %s", err);
+            for (i = 0; i < drop_count; i++)
+                playlist_add(pl, drops[i]);
+            ui_drop_free_all(drops, drop_count);
+            drops = NULL;
+            drop_count = 0;
+            drop_cap = 0;
         }
 
         PlaybackStatus st;
@@ -381,8 +672,10 @@ main(int argc, char **argv)
         double shown;
         int browser_open;
         int slider_live;
+        int panel_actions = PL_ACTION_NONE;
 
         browser_open = file_browser_is_open(browser);
+        modal_active = save_modal_open || browser_open;
 
         /* Coalesce arrow-key repeats into one decoder rebuild per frame; this
          * runs before the status fetch so the label reflects the new position
@@ -393,6 +686,13 @@ main(int argc, char **argv)
         }
 
         playback_get_status(&st);
+
+        /* EOF is consumed by this read; advance before the label is built so
+         * the frame shows the next track rather than the finished one. */
+        if (st.finished) {
+            playlist_track_finished(pl);
+            playback_get_status(&st);
+        }
 
         /* A Stop or failed load while dragging must not leave a stale preview. */
         if (!st.has_track)
@@ -471,16 +771,18 @@ main(int argc, char **argv)
                      nk_rect(0, 0, (float)px_w, (float)px_h),
                      NK_WINDOW_NO_SCROLLBAR))
         {
-            /* row 1: Open button + status; inert while the browser is up */
+            /* row 1: Open button + status; inert while a dialog is up */
             nk_layout_row_template_begin(ctx, ui_s(30.0f, ui_scale));
             nk_layout_row_template_push_static(ctx, ui_s(90.0f, ui_scale));
             nk_layout_row_template_push_dynamic(ctx);
             nk_layout_row_template_end(ctx);
-            if (!browser || browser_open)
+            if (!browser || modal_active)
                 nk_widget_disable_begin(ctx);
-            if (nk_button_label(ctx, "Open"))
+            if (nk_button_label(ctx, "Open")) {
+                browser_list_mode = 0;
                 file_browser_open(browser, st.has_track ? st.name : NULL);
-            if (!browser || browser_open)
+            }
+            if (!browser || modal_active)
                 nk_widget_disable_end(ctx);
             nk_label(ctx, statusbuf, NK_TEXT_LEFT);
 
@@ -493,14 +795,22 @@ main(int argc, char **argv)
             if (!st.has_track) {
                 nk_label(ctx, "drop a .wav, .mp3, .flac, .ogg, .aiff, .aif or .aifc here", NK_TEXT_CENTERED);
             } else if (ui_seek_bar(ctx, ui_scale, progress,
-                                   !browser_open,
+                                   !modal_active,
                                    &seek_dragging, &seek_preview)) {
                 playback_seek((double)seek_preview * st.duration);
             }
 
-            /* row 4: transport buttons, disabled with no track or a dialog */
-            nk_layout_row_dynamic(ctx, ui_s(35.0f, ui_scale), 3);
-            if (!st.has_track || browser_open)
+            /* row 4: transport. Prev/Next work from list entries alone, so
+             * they stay live with no loaded track; Play/Pause/Stop need one. */
+            nk_layout_row_dynamic(ctx, ui_s(35.0f, ui_scale), 5);
+            if (playlist_count(pl) == 0 || modal_active)
+                nk_widget_disable_begin(ctx);
+            if (nk_button_label(ctx, "Prev"))
+                playlist_prev(pl);
+            if (playlist_count(pl) == 0 || modal_active)
+                nk_widget_disable_end(ctx);
+
+            if (!st.has_track || modal_active)
                 nk_widget_disable_begin(ctx);
             if (nk_button_label(ctx, "Play"))
                 playback_play();
@@ -508,16 +818,23 @@ main(int argc, char **argv)
                 playback_pause();
             if (nk_button_label(ctx, "Stop"))
                 playback_stop();
-            if (!st.has_track || browser_open)
+            if (!st.has_track || modal_active)
+                nk_widget_disable_end(ctx);
+
+            if (playlist_count(pl) == 0 || modal_active)
+                nk_widget_disable_begin(ctx);
+            if (nk_button_label(ctx, "Next"))
+                playlist_next(pl);
+            if (playlist_count(pl) == 0 || modal_active)
                 nk_widget_disable_end(ctx);
 
             /* row 5: volume label + slider; live with or without a track,
-             * disabled while the browser is modal or no audio device opened */
+             * disabled while a dialog is up or no audio device opened */
             nk_layout_row_template_begin(ctx, ui_s(30.0f, ui_scale));
             nk_layout_row_template_push_static(ctx, ui_s(60.0f, ui_scale));
             nk_layout_row_template_push_dynamic(ctx);
             nk_layout_row_template_end(ctx);
-            slider_live = !browser_open && playback_available();
+            slider_live = !modal_active && playback_available();
             nk_label(ctx, volbuf, NK_TEXT_LEFT);
             if (!slider_live)
                 nk_widget_disable_begin(ctx);
@@ -525,20 +842,55 @@ main(int argc, char **argv)
                 playback_set_volume((int)lroundf(volume * 100.0f));
             if (!slider_live)
                 nk_widget_disable_end(ctx);
+
+            /* row 6+: the playlist band fills whatever height is left */
+            panel_actions = ui_playlist_panel(pl, ctx, ui_scale, modal_active);
         }
         nk_end(ctx);
+
+        /* Toolbar consequences run after the main window closes so dialogs are
+         * never opened from inside another window's draw. */
+        if (panel_actions & PL_ACTION_OPEN_LIST) {
+            browser_list_mode = 1;
+            file_browser_open_for(browser, st.has_track ? st.name : NULL,
+                                  playlist_ext_supported, "Open playlist");
+        }
+        if (panel_actions & PL_ACTION_SAVE_AS) {
+            ui_save_path_default(save_path, sizeof save_path);
+            save_err[0] = '\0';
+            save_focus = 1;
+            save_modal_open = 1;
+            SDL_StartTextInput();
+        }
 
         /* Drawn as a second window after the main layout, which is what makes
          * "disable the main controls while open" sufficient to stop clicks
          * leaking through to the seek bar and transport. */
         if (browser_open && browser) {
             char chosen[4096];
-            char err[256];
 
             if (file_browser_draw(browser, ctx, ui_scale, (float)px_w,
                                   (float)px_h, chosen, sizeof chosen) == 1) {
-                if (playback_load(chosen, err, sizeof err) != 0)
-                    SDL_Log("playback_load failed: %s", err);
+                if (browser_list_mode) {
+                    char err[256];
+
+                    /* Open list replaces the queue and plays nothing. */
+                    if (playlist_load_file(pl, chosen, err, sizeof err) != 0)
+                        SDL_Log("playlist_load_file failed: %s", err);
+                } else {
+                    playlist_add(pl, chosen);
+                }
+            }
+        }
+
+        /* Same layering rule for the Save-as dialog: it is drawn last, above
+         * the main window and the playlist. */
+        if (save_modal_open) {
+            if (!ui_save_modal(ctx, ui_scale, (float)px_w, (float)px_h, pl,
+                               save_path, sizeof save_path,
+                               save_err, sizeof save_err, &save_focus)) {
+                save_modal_open = 0;
+                SDL_StopTextInput();
             }
         }
 
@@ -547,6 +899,11 @@ main(int argc, char **argv)
         nk_sdl_render(NK_ANTI_ALIASING_ON);
         SDL_RenderPresent(ren);
     }
+
+    /* Final autosave before the engine and SDL go away; the playlist only
+     * touches playback_stop/load, both of which need a live engine. */
+    ui_drop_free_all(drops, drop_count);
+    playlist_destroy(pl);
 
     /* Join the decoder thread and close the device before tearing down
      * SDL/Nuklear; otherwise macOS complains about an open audio device. */

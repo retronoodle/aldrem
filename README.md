@@ -6,13 +6,16 @@ No Electron. No webview. No package manager tail. One small C99 codebase, SDL2 f
 
 ```
 ┌──────────────────────────────────────────────┐
-│  Open…                                       │
-│                                              │
-│  ▶  ❚❚  ■      1:23 / 4:07                   │
+│  Open  track.flac | FLAC 44100 Hz stereo     │
+│               1:23 / 4:07                    │
 │  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━  │
-│                                              │
+│  Prev   Play   Pause   Stop   Next           │
 │  vol 70%  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━    │
-│  flac · 44100 Hz · 2 ch                      │
+│  Playlist - 3 tracks                         │
+│  Open list  Save as  Remove  Clear           │
+│  > 01 - first.flac                           │
+│    second.flac                               │
+│    third.flac                                │
 └──────────────────────────────────────────────┘
 ```
 
@@ -25,6 +28,7 @@ Most audio players are 200 MB of framework wrapped around `Play`. This one isn't
 - **Actually plays your files.** WAV, MP3, FLAC, Ogg Vorbis, AIFF/AIFC — five formats, one interface.
 - **Instant and lightweight.** Decode-ahead ring buffer, sample-accurate playhead, no dropouts.
 - **Zero-fuss loading.** Drag a file onto the window, or use the built-in file browser.
+- **A queue that survives a restart.** Everything you add is kept in a playlist, autosaved as plain `.m3u`, and waiting for you next time.
 
 ## Formats
 
@@ -45,10 +49,19 @@ Format detection works by extension, with magic-byte sniffing as a fallback — 
 | `Space`         | Play / pause               |
 | `←` / `→`       | Seek back / forward 5 s    |
 | `↑` / `↓`       | Volume up / down 5%        |
-| `Esc`           | Close browser, then quit   |
-| Drag & drop     | Load and play a file       |
+| `Esc`           | Close a dialog, then quit  |
+| Drag & drop     | Append; play when idle     |
+| Click a row     | Select it (Remove targets it) |
+| Double-click    | Play that row immediately  |
+| Prev / Next     | Previous / next entry      |
 
-The progress and volume sliders are live: seek mid-track, adjust volume, and it takes effect immediately.
+The progress and volume sliders are live: seek mid-track, adjust volume, and it takes effect immediately. Keys are global except while a dialog or the file browser is open, so typing a path works.
+
+## Playlists
+
+Anything you drop or open is appended to the playlist under the player. The track that is already playing keeps playing; when the player is idle, the first added file starts. Double-click a row to jump to it, and the end of a track auto-advances to the next one — playback stops at the end of the list, with no wrap.
+
+The live list is autosaved to `$XDG_CONFIG_HOME/cside-mediaplayer/playlist.m3u` (usually `~/.config/cside-mediaplayer/playlist.m3u`; the same path on macOS) on every change and on quit, and restored at launch. `Save as` writes a standard `.m3u` file you can share or open elsewhere; `Open list` loads one, replacing the current queue. There is no reordering, repeat or shuffle in this version.
 
 ## Build
 
@@ -94,6 +107,7 @@ On macOS, `make app` wraps the binary into a proper `mediaplayer.app` bundle wit
 ```
 main.c            SDL window, event loop, Nuklear UI, global shortcuts
 playback.c        audio device, decoder thread, ring buffer, volume, seeking
+playlist.c        queue model, .m3u read/write, autosave, auto-advance
 track.c           format detection + dispatch to the right decoder
 track_*.c         one small implementation per format
 file_browser.c    minimal in-app directory browser

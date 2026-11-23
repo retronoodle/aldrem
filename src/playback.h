@@ -18,6 +18,7 @@ typedef struct {
     int    bits_per_sample; /* decoded width, 0 when not meaningful (MP3) */
     int    sample_rate;    /* source sample rate, Hz */
     int    channels;       /* source channel count */
+    int    finished;       /* 1 on the single status read that consumes EOF */
 } PlaybackStatus;
 
 int  playback_init(void); /* SDL_OpenAudioDevice, ring alloc */

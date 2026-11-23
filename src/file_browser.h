@@ -9,12 +9,19 @@ struct nk_context;
 
 typedef struct FileBrowser FileBrowser;
 
+/* Nonzero when the browser should list name. NULL keeps the audio default. */
+typedef int (*fb_filter_fn)(const char *name);
+
 FileBrowser *file_browser_create(void);
 void file_browser_destroy(FileBrowser *fb);
 
 /* Opens the browser at last_dir, else the directory of suggested_path, else
  * the current working directory, else "/". */
 void file_browser_open(FileBrowser *fb, const char *suggested_path);
+/* Same, but lists files matching filter (NULL = supported audio files) and
+ * titles the window. Used by playlist mode for .m3u/.m3u8 lists. */
+void file_browser_open_for(FileBrowser *fb, const char *suggested_path,
+                           fb_filter_fn filter, const char *title);
 void file_browser_close(FileBrowser *fb);
 int  file_browser_is_open(const FileBrowser *fb);
 
