@@ -416,6 +416,31 @@ ui_playlist_panel(Playlist *pl, struct nk_context *ctx, float scale,
     return actions;
 }
 
+/* Tab order slots, shared by the frame and the key handler so both agree on
+ * which button Enter fires. Slots are fixed numbers rather than an array so a
+ * button added later cannot silently renumber the others. */
+enum {
+    UI_TAB_NONE = 0,
+    UI_TAB_PREV = 1,
+    UI_TAB_PLAY,
+    UI_TAB_STOP,
+    UI_TAB_NEXT,
+    UI_TAB_OPEN,
+    UI_TAB_LAST
+};
+
+/* Per-button press/hover state plus the focus slot for the frame. One
+ * instance lives in main() for the whole run: Nuklear widgets are
+ * immediate-mode, so anything that must survive a frame is held here. */
+struct UiButtons {
+    struct MpAnim prev, play, stop, next, open;
+    struct MpButtonOpts opt; /* focus slot and dt, refilled each frame */
+    /* The focused slot; UI_TAB_NONE = nobody. Tab is the only focus key the
+     * app consumes: Enter is left to Nuklear so edit fields and popups keep
+     * theirs, which also keeps its keyboard counters at one tick per press. */
+    int focus;
+};
+
 /* Time, seek, transport and volume, gathered inside the dock panel. Returns
  * the pending seek (seconds) when the seek bar was released, else 0; every
  * other action is applied here through the same calls as before. */
@@ -423,7 +448,7 @@ static double
 ui_transport_panel(struct nk_context *ctx, float scale, const struct MpTheme *th,
     const PlaybackStatus *st, Playlist *pl, int modal_active,
     const char *timebuf, float progress, const char *volbuf,
-    int *seek_dragging, float *seek_preview)
+    int *seek_dragging, float *seek_preview, struct UiButtons *ub)
 {
     double seek = 0.0;
     float volume = (float)st->volume_percent / 100.0f;
@@ -440,33 +465,28 @@ ui_transport_panel(struct nk_context *ctx, float scale, const struct MpTheme *th
         seek = (double)*seek_preview * st->duration;
     }
 
-    /* Prev/Next work from list entries alone, so they stay live with no loaded
-     * track; Play/Pause/Stop need one. */
-    nk_layout_row_dynamic(ctx, mp_s(35.0f, scale), 5);
-    if (playlist_count(pl) == 0 || modal_active)
-        nk_widget_disable_begin(ctx);
-    if (nk_button_label(ctx, "Prev"))
+    /* Prev | [hero Play/Pause] | Stop | Next. Prev/Next work from list entries
+     * alone, so they stay live with no loaded track; the hero and Stop need
+     * one. The hero is one toggle: its glyph follows the state read at the
+     * top of the frame, never a second query. */
+    nk_layout_row_dynamic(ctx, mp_s(40.0f, scale), 4);
+    if (mp_button(ctx, scale, th, NULL, MP_BTN_NEUTRAL, MP_ICON_PREV,
+                  UI_TAB_PREV, playlist_count(pl) > 0 && !modal_active,
+                  &ub->prev, &ub->opt))
         playlist_prev(pl);
-    if (playlist_count(pl) == 0 || modal_active)
-        nk_widget_disable_end(ctx);
-
-    if (!st->has_track || modal_active)
-        nk_widget_disable_begin(ctx);
-    if (nk_button_label(ctx, "Play"))
-        playback_play();
-    if (nk_button_label(ctx, "Pause"))
-        playback_pause();
-    if (nk_button_label(ctx, "Stop"))
+    if (mp_button(ctx, scale, th, NULL, MP_BTN_HERO,
+                  st->state == MP_PLAYING ? MP_ICON_PAUSE : MP_ICON_PLAY,
+                  UI_TAB_PLAY, st->has_track && !modal_active, &ub->play,
+                  &ub->opt))
+        playback_toggle();
+    if (mp_button(ctx, scale, th, NULL, MP_BTN_NEUTRAL, MP_ICON_STOP,
+                  UI_TAB_STOP, st->has_track && !modal_active, &ub->stop,
+                  &ub->opt))
         playback_stop();
-    if (!st->has_track || modal_active)
-        nk_widget_disable_end(ctx);
-
-    if (playlist_count(pl) == 0 || modal_active)
-        nk_widget_disable_begin(ctx);
-    if (nk_button_label(ctx, "Next"))
+    if (mp_button(ctx, scale, th, NULL, MP_BTN_NEUTRAL, MP_ICON_NEXT,
+                  UI_TAB_NEXT, playlist_count(pl) > 0 && !modal_active,
+                  &ub->next, &ub->opt))
         playlist_next(pl);
-    if (playlist_count(pl) == 0 || modal_active)
-        nk_widget_disable_end(ctx);
 
     /* Volume label + slider; live with or without a track, disabled while a
      * dialog is up or no audio device opened. */
@@ -686,6 +706,13 @@ main(int argc, char **argv)
     char save_path[4096] = "";
     char save_err[256] = "";
 
+    struct UiButtons buttons;
+    memset(&buttons, 0, sizeof buttons);
+
+    /* Phase 7 placeholder: a real per-frame dt replaces this clamped millisecond
+     * delta, and the widgets' easing call sites stay the same. */
+    Uint32 last_ticks = SDL_GetTicks();
+
     while (running) {
         /* Derive sizes fresh each frame: the resize event values are points,
          * while Nuklear lays out in physical pixels. */
@@ -705,6 +732,11 @@ main(int argc, char **argv)
 
             /* Recomputed per event: Esc can close a modal mid-batch. */
             modal_active = save_modal_open || file_browser_is_open(browser);
+
+            /* A click is a pointer gesture, so it drops keyboard focus: the
+             * ring should not linger on a button the mouse did not pick. */
+            if (evt.type == SDL_MOUSEBUTTONDOWN)
+                buttons.focus = UI_TAB_NONE;
 
             if (evt.type == SDL_QUIT) {
                 running = 0;
@@ -727,6 +759,16 @@ main(int argc, char **argv)
                     file_browser_close(browser);
                 else
                     running = 0;
+            } else if (!modal_active && evt.type == SDL_KEYDOWN &&
+                       !evt.key.repeat &&
+                       evt.key.keysym.scancode == SDL_SCANCODE_TAB) {
+                /* Tab walks the converted buttons in reading order and wraps.
+                 * Consumed so Nuklear's edit fields never see it; the modal
+                 * gate above keeps Tab in text entry while a dialog is up. */
+                consumed = 1;
+                buttons.focus++;
+                if (buttons.focus >= UI_TAB_LAST)
+                    buttons.focus = UI_TAB_PREV;
             } else if (!modal_active && evt.type == SDL_KEYDOWN &&
                        evt.key.keysym.scancode == SDL_SCANCODE_LEFT) {
                 pending_seek -= 5.0;
@@ -793,6 +835,19 @@ main(int argc, char **argv)
 
         browser_open = file_browser_is_open(browser);
         modal_active = save_modal_open || browser_open;
+
+        /* One dt per frame for the hover/press easing, clamped so a stalled
+         * window (a drag, a resize) cannot jump an animation to its end. */
+        {
+            Uint32 now = SDL_GetTicks();
+            Uint32 span = now - last_ticks;
+
+            last_ticks = now;
+            if (span > 100)
+                span = 100;
+            buttons.opt.dt = (float)span / 1000.0f;
+        }
+        buttons.opt.focus_slot = buttons.focus;
 
         /* Coalesce arrow-key repeats into one decoder rebuild per frame; this
          * runs before the status fetch so the label reflects the new position
@@ -898,18 +953,17 @@ main(int argc, char **argv)
                                            ui_scale);
 
             /* header: Open button + status; inert while a dialog is up */
-            nk_layout_row_template_begin(ctx, mp_s(30.0f, ui_scale));
+            nk_layout_row_template_begin(ctx, mp_s(34.0f, ui_scale));
             nk_layout_row_template_push_static(ctx, mp_s(90.0f, ui_scale));
             nk_layout_row_template_push_dynamic(ctx);
             nk_layout_row_template_end(ctx);
-            if (!browser || modal_active)
-                nk_widget_disable_begin(ctx);
-            if (nk_button_label(ctx, "Open")) {
+            if (mp_button(ctx, ui_scale, &theme, "Open", MP_BTN_PRIMARY,
+                          MP_ICON_PLAY, UI_TAB_OPEN,
+                          browser && !modal_active, &buttons.open,
+                          &buttons.opt)) {
                 browser_list_mode = 0;
                 file_browser_open(browser, st.has_track ? st.name : NULL);
             }
-            if (!browser || modal_active)
-                nk_widget_disable_end(ctx);
             nk_label(ctx, statusbuf, NK_TEXT_LEFT);
 
             /* The dock holds time, seek, transport and volume; its content
@@ -919,14 +973,14 @@ main(int argc, char **argv)
              * or pushed the group styles, so an unconditional end would pop
              * an empty stack and close a group that was never begun. */
             dock_open = mp_dock_begin(ctx, ui_scale, col,
-                mp_s(135.0f, ui_scale) + 3.0f * mp_s(4.0f, ui_scale),
+                mp_s(140.0f, ui_scale) + 3.0f * mp_s(4.0f, ui_scale),
                 &theme);
             if (dock_open) {
                 double seek = ui_transport_panel(ctx, ui_scale, &theme, &st,
                                                  pl, modal_active, timebuf,
                                                  progress, volbuf,
                                                  &seek_dragging,
-                                                 &seek_preview);
+                                                 &seek_preview, &buttons);
 
                 if (seek != 0.0)
                     playback_seek(seek);
@@ -964,7 +1018,7 @@ main(int argc, char **argv)
         if (browser_open && browser) {
             char chosen[4096];
 
-            if (file_browser_draw(browser, ctx, ui_scale, (float)px_w,
+            if (file_browser_draw(browser, ctx, ui_scale, NULL, (float)px_w,
                                   (float)px_h, chosen, sizeof chosen) == 1) {
                 if (browser_list_mode) {
                     char err[256];

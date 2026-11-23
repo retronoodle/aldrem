@@ -6,6 +6,7 @@
 #include <stddef.h>
 
 struct nk_context;
+struct MpTheme;
 
 typedef struct FileBrowser FileBrowser;
 
@@ -26,9 +27,11 @@ void file_browser_close(FileBrowser *fb);
 int  file_browser_is_open(const FileBrowser *fb);
 
 /* 1 = file chosen (absolute path written to out, fb closed),
- * -1 = cancelled/closed, 0 = still open. Call only while is_open. */
+ * -1 = cancelled/closed, 0 = still open. Call only while is_open.
+ * theme may be NULL, which keeps the stock footer buttons; a theme draws the
+ * footer with the shared button helper (Phase 6 passes it). */
 int  file_browser_draw(FileBrowser *fb, struct nk_context *ctx, float scale,
-                       float screen_w, float screen_h,
+                       struct MpTheme *theme, float screen_w, float screen_h,
                        char *out, size_t outlen);
 
 #endif

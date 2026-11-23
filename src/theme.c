@@ -33,6 +33,7 @@
 #define MP_DANGER_SURFACE   nk_rgb( 42,  22,  32) /* #2A1620 */
 #define MP_SHADOW           nk_rgba(  3,   5,  10, 102) /* #03060A @ 40% */
 #define MP_HIGHLIGHT        nk_rgb(255, 255, 255) /* dock top sheen, alpha applied */
+#define MP_INK              nk_rgb(  0,   0,   0) /* button bottom shade */
 
 /* Backdrop: this many flat horizontal bands approximate the vertical gradient;
  * more bands means fainter steps but a pixel loop that is still one fill each. */
@@ -506,4 +507,311 @@ mp_dock_end(struct nk_context *ctx)
     nk_style_pop_vec2(ctx);
     nk_style_pop_float(ctx);
     nk_style_pop_color(ctx);
+}
+
+
+/* Buttons. Sizes in logical points; the transport rows are pills, the text
+ * buttons a softer corner. The minimum keeps a bare glyph button a legal 32 pt
+ * hit target even on the smallest row. */
+#define MP_BTN_H_TRANSPORT  40.0f
+#define MP_BTN_H_TEXT       34.0f
+#define MP_BTN_R_TEXT        9.0f
+#define MP_BTN_MIN_W        32.0f
+#define MP_BTN_LABEL_PAD    10.0f
+
+/* Draw-time alphas (0..255). The sheen and shade are the dock's gloss recipe
+ * applied inside the silhouette: both are inset by the rounding so they cannot
+ * escape past the corners, which is the rule this whole helper is built on. */
+#define MP_BTN_SHADOW_A     90
+#define MP_BTN_SHEEN_A      26
+#define MP_BTN_SHADE_A      36
+#define MP_BTN_DISABLED_A  140
+#define MP_BTN_FOCUS_A     179
+
+/* How hard a hover or a hold lifts and darkens the face. */
+#define MP_BTN_HOVER_LIFT   0.25f
+#define MP_BTN_PRESS_DARK   0.12f
+
+/* Glyph box as a fraction of the button height: about a third reads as a
+ * transport glyph rather than a logo. */
+#define MP_ICON_FRAC        0.36f
+#define MP_ICON_BAR         3.0f
+
+/* Easing time constants in seconds (the PRD's 60 ms hover, 30 ms press). The
+ * exponential form makes a slow frame ease proportionally, not jump. */
+#define MP_HOVER_TAU        0.060f
+#define MP_PRESS_TAU        0.030f
+
+float
+mp_button_height(enum mp_btn_kind kind)
+{
+    return kind == MP_BTN_HERO ? MP_BTN_H_TRANSPORT : MP_BTN_H_TEXT;
+}
+
+/* Frame-rate independent approach to `target`; dt of 0 holds still. */
+static float
+mp_ease(float a, float target, float dt, float tau)
+{
+    if (dt <= 0.0f)
+        return a;
+    return a + (target - a) * (1.0f - expf(-dt / tau));
+}
+
+/* Scales a colour's RGB; keep its alpha. The pressed step of every variant. */
+static struct nk_color
+mp_shade_down(struct nk_color c, float f)
+{
+    return nk_rgba((int)lroundf((float)c.r * f), (int)lroundf((float)c.g * f),
+                   (int)lroundf((float)c.b * f), (int)c.a);
+}
+
+/* The face fill. A hero at rest and the primary button run the accent
+ * gradient left to right; a neutral button is glass that lifts one surface step
+ * on hover and darkens on hold. */
+static void
+mp_btn_face(struct nk_context *ctx, struct nk_rect r, float radius, int accent,
+    float hover, float press, const struct MpTheme *th)
+{
+    struct nk_command_buffer *canvas = nk_window_get_canvas(ctx);
+    float lift = hover * (1.0f - press);
+
+    if (accent) {
+        struct nk_color l = mp_col_lerp(th->accent_a, MP_HIGHLIGHT,
+                                        lift * MP_BTN_HOVER_LIFT);
+        struct nk_color rr = mp_col_lerp(th->accent_b, MP_HIGHLIGHT,
+                                         lift * MP_BTN_HOVER_LIFT);
+
+        if (press > 0.0f) {
+            float k = 1.0f - MP_BTN_PRESS_DARK * press;
+
+            l = mp_shade_down(l, k);
+            rr = mp_shade_down(rr, k);
+        }
+        nk_fill_rect_multi_color(canvas, r, l, l, rr, rr);
+    } else {
+        /* `lift` is eased 0..1 already; mixing the whole step here and the
+         * per-frame easing above would square the curve. */
+        struct nk_color base = mp_col_lerp(th->surface, th->surface_hover,
+                                           hover * (1.0f - press));
+
+        if (press > 0.0f)
+            base = mp_shade_down(base, 1.0f - MP_BTN_PRESS_DARK * press);
+        nk_fill_rect(canvas, r, radius, base);
+    }
+}
+
+/* Layered gloss over the face: a white sheen in the upper band, a black shade
+ * in the lower. Both are inset corners so a rounded button cannot show them
+ * hanging outside its silhouette. The sheen fades out as the button is held,
+ * which with the 1 px shift is what "pressed" looks like. */
+static void
+mp_btn_gloss(struct nk_context *ctx, struct nk_rect r, float radius,
+    float border, float press)
+{
+    struct nk_command_buffer *canvas = nk_window_get_canvas(ctx);
+    struct nk_rect inner;
+    float band_h;
+
+    inner = nk_rect(r.x + radius + border, r.y + radius + border,
+                    r.w - 2.0f * (radius + border),
+                    r.h - 2.0f * (radius + border));
+    if (inner.w <= 0.0f || inner.h <= 0.0f)
+        return;
+
+    band_h = inner.h * 0.45f;
+    if (band_h > 0.0f && press < 1.0f) {
+        struct nk_color hi = mp_col_alpha(MP_HIGHLIGHT,
+            (int)lroundf((float)MP_BTN_SHEEN_A * (1.0f - press)));
+        struct nk_color none = mp_col_alpha(MP_HIGHLIGHT, 0);
+
+        nk_fill_rect_multi_color(canvas,
+            nk_rect(inner.x, inner.y, inner.w, band_h), hi, hi, none, none);
+    }
+
+    band_h = inner.h * 0.5f;
+    if (band_h > 0.0f) {
+        struct nk_color lo = mp_col_alpha(MP_INK, MP_BTN_SHADE_A);
+        struct nk_color none = mp_col_alpha(MP_INK, 0);
+
+        nk_fill_rect_multi_color(canvas,
+            nk_rect(inner.x, inner.y + inner.h - band_h, inner.w, band_h),
+            none, none, lo, lo);
+    }
+}
+
+/* A transport glyph centred in `box`, drawn from primitives. */
+static void
+mp_draw_icon(struct nk_context *ctx, struct nk_rect box, enum mp_icon icon,
+    struct nk_color col, float scale)
+{
+    struct nk_command_buffer *canvas = nk_window_get_canvas(ctx);
+    float cx = box.x + box.w * 0.5f;
+    float cy = box.y + box.h * 0.5f;
+    float h = box.h, w = box.w;
+    float bar = mp_s(MP_ICON_BAR, scale);
+    float gap = mp_s(2.0f, scale);
+
+    switch (icon) {
+    case MP_ICON_PLAY:
+        /* Nudged right: a triangle's mass sits left of its bounding box. */
+        nk_fill_triangle(canvas,
+            cx - w * 0.30f + mp_s(1.0f, scale), cy - h * 0.42f,
+            cx - w * 0.30f + mp_s(1.0f, scale), cy + h * 0.42f,
+            cx + w * 0.40f, cy, col);
+        break;
+    case MP_ICON_PAUSE:
+        nk_fill_rect(canvas, nk_rect(cx - gap * 0.5f - bar, cy - h * 0.42f,
+                                     bar, h * 0.84f), 0.0f, col);
+        nk_fill_rect(canvas, nk_rect(cx + gap * 0.5f, cy - h * 0.42f,
+                                     bar, h * 0.84f), 0.0f, col);
+        break;
+    case MP_ICON_STOP:
+        nk_fill_rect(canvas, nk_rect(cx - w * 0.34f, cy - h * 0.34f,
+                                     w * 0.68f, h * 0.68f),
+                     mp_s(1.0f, scale), col);
+        break;
+    case MP_ICON_PREV:
+    case MP_ICON_NEXT: {
+        /* Triangle pointing in the travel direction, bar on the leading edge. */
+        int prev = icon == MP_ICON_PREV;
+        float dir = prev ? -1.0f : 1.0f;
+        float tx = cx + dir * w * 0.10f;
+        float bx = cx - dir * w * 0.30f;
+
+        nk_fill_triangle(canvas,
+            tx + dir * w * 0.20f, cy,
+            tx - dir * w * 0.20f, cy - h * 0.40f,
+            tx - dir * w * 0.20f, cy + h * 0.40f, col);
+        if (prev)
+            nk_fill_rect(canvas, nk_rect(bx - bar, cy - h * 0.40f, bar,
+                                         h * 0.80f), 0.0f, col);
+        else
+            nk_fill_rect(canvas, nk_rect(bx + w * 0.20f, cy - h * 0.40f, bar,
+                                         h * 0.80f), 0.0f, col);
+        break;
+    }
+    }
+}
+
+int
+mp_button(struct nk_context *ctx, float scale, const struct MpTheme *th,
+    const char *label, enum mp_btn_kind kind, enum mp_icon icon, int tab,
+    int enabled, struct MpAnim *anim, const struct MpButtonOpts *opt)
+{
+    struct nk_command_buffer *canvas;
+    struct nk_rect r;
+    enum nk_widget_layout_states state;
+    float radius, border, shift;
+    int accent, hovered = 0, focused, clicked = 0, disabled;
+    float dt = opt ? opt->dt : 0.0f;
+
+    state = nk_widget(&r, ctx);
+    if (state == NK_WIDGET_INVALID)
+        return 0;
+
+    /* `nk_widget` reports the window's disable flag as its own state; the
+     * caller's flag covers "no track"/"modal up" without pushing a style. */
+    disabled = !enabled || state == NK_WIDGET_DISABLED;
+    /* The accent face belongs to the primary button and the hero; a hero while
+     * playing or paused still gets the gradient, only its glyph changes. */
+    accent = kind == MP_BTN_PRIMARY || kind == MP_BTN_HERO;
+
+    /* Transport rows may already be a pill; the text rows get their corner. */
+    radius = kind == MP_BTN_HERO ? r.h * 0.5f : mp_s(MP_BTN_R_TEXT, scale);
+    if (r.w < mp_s(MP_BTN_MIN_W, scale))
+        r.w = mp_s(MP_BTN_MIN_W, scale);
+    border = mp_s(1.0f, scale);
+    if (border < 1.0f)
+        border = 1.0f;
+
+    /* Interaction. ROM still draws; it just cannot be pressed. The `pressed`
+     * flag is what makes a release outside a cancel and a press that began
+     * elsewhere inert, matching NK_BUTTON_TRIGGER_ON_RELEASE. Rect tests beat
+     * nk_widget_is_hovered here: that helper also refuses while another widget
+     * owns `ctx->active`, which is exactly the state a held button is in, so it
+     * would drop the press it just started. The browser modal cannot steal this
+     * either way, because the caller passes enabled = 0 while it is open. */
+    if (!disabled && state != NK_WIDGET_ROM) {
+        hovered = nk_input_is_mouse_hovering_rect(&ctx->input, r) ? 1 : 0;
+        if (hovered && nk_input_is_mouse_pressed(&ctx->input, NK_BUTTON_LEFT))
+            anim->pressed = 1;
+        if (anim->pressed) {
+            if (nk_input_is_mouse_released(&ctx->input, NK_BUTTON_LEFT)) {
+                anim->pressed = 0;
+                if (hovered)
+                    clicked = 1;
+            } else if (!nk_input_is_mouse_down(&ctx->input, NK_BUTTON_LEFT)) {
+                anim->pressed = 0;
+            }
+        }
+    } else {
+        anim->pressed = 0;
+    }
+
+    /* Enter (or Space, which main() consumes before it reaches this context,
+     * so only Enter arrives) activates the focused button. nk_input_is_key_
+     * pressed latches for as long as the key is held, so the press edge is
+     * the down state crossed with the context's keyboard repeat counter --
+     * which main() feeds from SDL with key repeat filtered out. */
+    focused = opt && tab != 0 && tab == opt->focus_slot;
+    if (focused && !disabled && nk_input_is_key_down(&ctx->input, NK_KEY_ENTER) &&
+        ctx->input.keyboard.keys[NK_KEY_ENTER].clicked >= 1 && ctx->input.keyboard.keys[NK_KEY_ENTER].clicked < 2)
+        clicked = 1;
+
+    /* Hover dims while the pointer is down elsewhere (a drag over the button
+     * is not a hover), but only a press that began here sinks the face. */
+    if (hovered && nk_input_is_mouse_down(&ctx->input, NK_BUTTON_LEFT))
+        hovered = 0;
+    anim->hover = mp_ease(anim->hover, hovered ? 1.0f : 0.0f, dt, MP_HOVER_TAU);
+    anim->press = mp_ease(anim->press, anim->pressed ? 1.0f : 0.0f, dt,
+                          MP_PRESS_TAU);
+
+    canvas = nk_window_get_canvas(ctx);
+    shift = anim->press * mp_s(1.0f, scale);
+
+    /* Shadow, face, gloss, border, in that order: the shadow sits under the
+     * raised face and is not drawn on a disabled or already-flat button. */
+    if (!disabled)
+        nk_fill_rect(canvas, nk_rect(r.x, r.y + mp_s(2.0f, scale) - shift,
+                                     r.w, r.h), radius,
+                     mp_col_alpha(th->shadow, MP_BTN_SHADOW_A));
+    mp_btn_face(ctx, nk_rect(r.x, r.y + shift, r.w, r.h), radius, accent,
+                anim->hover, anim->press, th);
+    mp_btn_gloss(ctx, nk_rect(r.x, r.y + shift, r.w, r.h), radius, border,
+                 anim->press);
+    nk_stroke_rect(canvas, nk_rect(r.x, r.y + shift, r.w, r.h),
+                   radius - border * 0.5f, border,
+                   disabled ? mp_col_alpha(th->border, MP_BTN_DISABLED_A)
+                            : mp_col_lerp(th->border, th->border_strong,
+                                          anim->hover));
+
+    if (focused)
+        nk_stroke_rect(canvas,
+                       nk_rect(r.x - mp_s(2.0f, scale), r.y - mp_s(2.0f, scale),
+                               r.w + mp_s(4.0f, scale), r.h + mp_s(4.0f, scale)),
+                       radius + mp_s(1.0f, scale), mp_s(2.0f, scale),
+                       mp_col_alpha(th->accent_b, MP_BTN_FOCUS_A));
+
+    if (label) {
+        struct nk_rect tr;
+        float pad = mp_s(MP_BTN_LABEL_PAD, scale);
+        struct nk_color ink = accent ? th->accent_ink : th->text_primary;
+
+        tr = nk_rect(r.x + pad, r.y + shift, r.w - 2.0f * pad, r.h);
+        /* A fully transparent background: the text draws its own glyphs and
+         * the face beneath it is already painted. */
+        nk_draw_text(canvas, tr, label, (int)strlen(label), ctx->style.font,
+                     mp_col_alpha(MP_INK, 0),
+                     disabled ? mp_col_alpha(ink, MP_BTN_DISABLED_A) : ink);
+    } else {
+        float ih = r.h * MP_ICON_FRAC;
+        struct nk_color ink = accent ? th->accent_ink : th->text_primary;
+
+        mp_draw_icon(ctx, nk_rect(r.x + (r.w - ih) * 0.5f,
+                                  r.y + shift + (r.h - ih) * 0.5f, ih, ih),
+                     icon, disabled ? mp_col_alpha(ink, MP_BTN_DISABLED_A)
+                                    : ink, scale);
+    }
+
+    return clicked;
 }

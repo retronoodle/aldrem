@@ -77,6 +77,42 @@ struct nk_color mp_col_alpha(struct nk_color c, int a);
 float mp_s(float v, float s);
 struct nk_vec2 mp_sv(float x, float y, float s);
 
+/* Buttons. Three variants share one drawing helper: primary (the accent
+ * gradient, for Open), hero (Play/Pause: accent gradient only while stopped)
+ * and neutral (surface glass, for everything else). */
+enum mp_btn_kind { MP_BTN_PRIMARY, MP_BTN_HERO, MP_BTN_NEUTRAL };
+
+/* Glyphs are canvas primitives, not text: the default font has no symbols. */
+enum mp_icon { MP_ICON_PLAY, MP_ICON_PAUSE, MP_ICON_STOP,
+               MP_ICON_PREV, MP_ICON_NEXT };
+
+/* Caller-owned state for one button, held across frames (never a static). */
+struct MpAnim {
+    float hover;   /* 0..1 eased: 0 idle, 1 hovered */
+    float press;   /* 0..1 eased: 0 raised, 1 held down */
+    int   pressed; /* press began inside; activate on release inside */
+};
+
+/* Per-frame options for mp_button. */
+struct MpButtonOpts {
+    int   focus_slot; /* the slot focused this frame; 0 = none */
+    float dt;         /* seconds since the last frame, for easing */
+};
+
+/* Height in points of the buttons this phase draws: transport 40 (pill
+ * rounding), 34 for the header and browser footer. */
+float mp_button_height(enum mp_btn_kind kind);
+
+/* Lays out, draws and runs one button in the current row. Returns 1 when
+ * activated: press inside then release inside, or Enter while focused. A NULL
+ * label draws the icon alone; `enabled` 0 draws the disabled style and ignores
+ * input. `tab` is only compared against opt->focus_slot to draw the ring:
+ * main() owns Tab and Enter routing and uses the same slots. */
+int mp_button(struct nk_context *ctx, float scale, const struct MpTheme *th,
+              const char *label, enum mp_btn_kind kind, enum mp_icon icon,
+              int tab, int enabled, struct MpAnim *anim,
+              const struct MpButtonOpts *opt);
+
 /* Dock panel. mp_dock_begin lays out one dock-height row spanning `col`, draws
  * the shadow, fill, border and top highlight, then opens a grouped layout for
  * the caller's rows (which must total `content_h`). Returns 1 when the caller
