@@ -19,6 +19,7 @@
 #include "file_browser.h"
 #include "playback.h"
 #include "playlist.h"
+#include "theme.h"
 #include "track.h"
 
 #define UI_DENSITY 0.8f
@@ -69,47 +70,6 @@ ui_get_pixel_size(SDL_Window *win, SDL_Renderer *ren, int *px_w, int *px_h)
     return (float)out_w / (float)point_w;
 }
 
-static float
-ui_s(float v, float s)
-{
-    return lroundf(v * s);
-}
-
-static struct nk_vec2
-ui_sv(float x, float y, float s)
-{
-    return nk_vec2(ui_s(x, s), ui_s(y, s));
-}
-
-/* Scale the widget metrics this app uses from the Nuklear defaults. Callers
- * must call nk_style_default first so values are not compounded. */
-static void
-ui_scale_style(struct nk_context *ctx, float s)
-{
-    struct nk_style *st = &ctx->style;
-
-    st->window.padding = ui_sv(4.0f, 4.0f, s);
-    st->window.spacing = ui_sv(4.0f, 4.0f, s);
-    st->window.scrollbar_size = ui_sv(10.0f, 10.0f, s);
-    st->window.border = ui_s(2.0f, s);
-    st->window.rounding = ui_s(0.0f, s);
-    st->window.min_row_height_padding = ui_s(8.0f, s);
-
-    st->text.padding = ui_sv(0.0f, 0.0f, s);
-
-    st->button.padding = ui_sv(2.0f, 2.0f, s);
-    st->button.image_padding = ui_sv(0.0f, 0.0f, s);
-    st->button.border = ui_s(1.0f, s);
-    st->button.rounding = ui_s(4.0f, s);
-
-    st->slider.cursor_size = ui_sv(16.0f, 16.0f, s);
-    st->slider.padding = ui_sv(2.0f, 2.0f, s);
-    st->slider.spacing = ui_sv(2.0f, 2.0f, s);
-    st->slider.bar_height = ui_s(4.0f, s);
-    st->slider.rounding = ui_s(0.0f, s);
-    st->slider.border = ui_s(0.0f, s);
-}
-
 static void
 ui_select_font(struct nk_context *ctx, float ratio,
     struct nk_font *font_1x, struct nk_font *font_2x)
@@ -142,8 +102,8 @@ ui_scale_mouse_event(SDL_Event *evt, float ratio)
  * fraction and keeps it live; on mouse release returns 1 (caller seeks).
  * Nuklear input is already in physical pixels, matching the layout rect. */
 static int
-ui_seek_bar(struct nk_context *ctx, float s, float frac,
-    int enabled, int *dragging, float *preview)
+ui_seek_bar(struct nk_context *ctx, float s, const struct MpTheme *th,
+    float frac, int enabled, int *dragging, float *preview)
 {
     struct nk_command_buffer *canvas;
     struct nk_rect b;
@@ -182,19 +142,19 @@ ui_seek_bar(struct nk_context *ctx, float s, float frac,
         shown = 1.0f;
 
     canvas = nk_window_get_canvas(ctx);
-    bar_h = ui_s(4.0f, s);
+    bar_h = mp_s(4.0f, s);
     if (bar_h < 1.0f)
         bar_h = 1.0f;
     cy = b.y + b.h * 0.5f;
 
     nk_fill_rect(canvas, nk_rect(b.x, cy - bar_h * 0.5f, b.w, bar_h),
-        0.0f, nk_rgb(60, 60, 68));
+        0.0f, mp_theme_track(th));
     if (shown > 0.0f)
         nk_fill_rect(canvas, nk_rect(b.x, cy - bar_h * 0.5f, b.w * shown, bar_h),
-            0.0f, nk_rgb(110, 150, 230));
+            0.0f, mp_theme_accent(th));
 
     if (enabled) {
-        handle_w = ui_s(12.0f, s);
+        handle_w = mp_s(12.0f, s);
         if (handle_w < 4.0f)
             handle_w = 4.0f;
         cx = b.x + b.w * shown - handle_w * 0.5f;
@@ -204,7 +164,7 @@ ui_seek_bar(struct nk_context *ctx, float s, float frac,
             cx = b.x + b.w - handle_w;
         nk_fill_rect(canvas,
             nk_rect(cx, cy - handle_w * 0.5f, handle_w, handle_w),
-            ui_s(2.0f, s), nk_rgb(220, 225, 235));
+            mp_s(2.0f, s), mp_theme_text_primary(th));
     }
 
     return released;
@@ -306,8 +266,8 @@ ui_playlist_panel(Playlist *pl, struct nk_context *ctx, float scale,
     static Uint32 last_click_ms = 0;
 
     char header[64];
-    float row_h = ui_s(PL_ROW_H, scale);
-    float bar_h = ui_s(28.0f, scale);
+    float row_h = mp_s(PL_ROW_H, scale);
+    float bar_h = mp_s(28.0f, scale);
     int count = playlist_count(pl);
     int current = playlist_current(pl);
     int selected = playlist_selected(pl);
@@ -357,7 +317,7 @@ ui_playlist_panel(Playlist *pl, struct nk_context *ctx, float scale,
         struct nk_rect content = nk_window_get_content_region(ctx);
         struct nk_rect last = nk_layout_widget_bounds(ctx);
         float list_h = (content.y + content.h) - (last.y + last.h)
-            - ui_s(4.0f, scale);
+            - mp_s(4.0f, scale);
 
         if (list_h < 3.0f * row_h)
             list_h = 3.0f * row_h;
@@ -426,10 +386,10 @@ ui_save_modal(struct nk_context *ctx, float scale, float screen_w,
     char *err, size_t errlen, int *focus)
 {
     struct nk_rect bounds;
-    float margin = ui_s(40.0f, scale);
-    float w = ui_s(560.0f, scale);
-    float h = ui_s(200.0f, scale);
-    float row_h = ui_s(28.0f, scale);
+    float margin = mp_s(40.0f, scale);
+    float w = mp_s(560.0f, scale);
+    float h = mp_s(200.0f, scale);
+    float row_h = mp_s(28.0f, scale);
     int keep = 1;
 
     if (w > screen_w - 2.0f * margin)
@@ -576,8 +536,11 @@ main(int argc, char **argv)
     int px_w, px_h;
     float ratio = ui_get_pixel_size(win, ren, &px_w, &px_h);
     float ui_scale = ratio * UI_DENSITY;
+    struct MpTheme theme;
+
+    mp_theme_init(&theme, ren);
     nk_style_default(ctx);
-    ui_scale_style(ctx, ui_scale);
+    mp_theme_apply(ctx, ui_scale, &theme);
     ui_select_font(ctx, ratio, font_1x, font_2x);
     float style_scale = ui_scale;
 
@@ -621,7 +584,7 @@ main(int argc, char **argv)
         ui_scale = ratio * UI_DENSITY;
         if (ui_scale != style_scale) {
             nk_style_default(ctx);
-            ui_scale_style(ctx, ui_scale);
+            mp_theme_apply(ctx, ui_scale, &theme);
             ui_select_font(ctx, ratio, font_1x, font_2x);
             style_scale = ui_scale;
         }
@@ -812,13 +775,18 @@ main(int argc, char **argv)
             snprintf(window_title, sizeof window_title, "%s", title);
         }
 
+        /* The root window is the frame itself, so hide its fill here (not in
+         * the shared style) to let the backdrop show through. Panels and
+         * dialogs drawn inside keep their surface. */
+        nk_style_push_style_item(ctx, &ctx->style.window.fixed_background,
+                                 nk_style_item_hide());
         if (nk_begin(ctx, "aldrem",
                      nk_rect(0, 0, (float)px_w, (float)px_h),
                      NK_WINDOW_NO_SCROLLBAR))
         {
             /* row 1: Open button + status; inert while a dialog is up */
-            nk_layout_row_template_begin(ctx, ui_s(30.0f, ui_scale));
-            nk_layout_row_template_push_static(ctx, ui_s(90.0f, ui_scale));
+            nk_layout_row_template_begin(ctx, mp_s(30.0f, ui_scale));
+            nk_layout_row_template_push_static(ctx, mp_s(90.0f, ui_scale));
             nk_layout_row_template_push_dynamic(ctx);
             nk_layout_row_template_end(ctx);
             if (!browser || modal_active)
@@ -832,14 +800,14 @@ main(int argc, char **argv)
             nk_label(ctx, statusbuf, NK_TEXT_LEFT);
 
             /* row 2: time label, centered */
-            nk_layout_row_dynamic(ctx, ui_s(35.0f, ui_scale), 1);
+            nk_layout_row_dynamic(ctx, mp_s(35.0f, ui_scale), 1);
             nk_label(ctx, timebuf, NK_TEXT_CENTERED);
 
             /* row 3: seek bar — click or drag to seek, released on mouse up */
-            nk_layout_row_dynamic(ctx, ui_s(35.0f, ui_scale), 1);
+            nk_layout_row_dynamic(ctx, mp_s(35.0f, ui_scale), 1);
             if (!st.has_track) {
                 nk_label(ctx, "drop a .wav, .mp3, .flac, .ogg, .aiff, .aif or .aifc here", NK_TEXT_CENTERED);
-            } else if (ui_seek_bar(ctx, ui_scale, progress,
+            } else if (ui_seek_bar(ctx, ui_scale, &theme, progress,
                                    !modal_active,
                                    &seek_dragging, &seek_preview)) {
                 playback_seek((double)seek_preview * st.duration);
@@ -847,7 +815,7 @@ main(int argc, char **argv)
 
             /* row 4: transport. Prev/Next work from list entries alone, so
              * they stay live with no loaded track; Play/Pause/Stop need one. */
-            nk_layout_row_dynamic(ctx, ui_s(35.0f, ui_scale), 5);
+            nk_layout_row_dynamic(ctx, mp_s(35.0f, ui_scale), 5);
             if (playlist_count(pl) == 0 || modal_active)
                 nk_widget_disable_begin(ctx);
             if (nk_button_label(ctx, "Prev"))
@@ -875,8 +843,8 @@ main(int argc, char **argv)
 
             /* row 5: volume label + slider; live with or without a track,
              * disabled while a dialog is up or no audio device opened */
-            nk_layout_row_template_begin(ctx, ui_s(30.0f, ui_scale));
-            nk_layout_row_template_push_static(ctx, ui_s(60.0f, ui_scale));
+            nk_layout_row_template_begin(ctx, mp_s(30.0f, ui_scale));
+            nk_layout_row_template_push_static(ctx, mp_s(60.0f, ui_scale));
             nk_layout_row_template_push_dynamic(ctx);
             nk_layout_row_template_end(ctx);
             slider_live = !modal_active && playback_available();
@@ -892,6 +860,7 @@ main(int argc, char **argv)
             panel_actions = ui_playlist_panel(pl, ctx, ui_scale, modal_active);
         }
         nk_end(ctx);
+        nk_style_pop_style_item(ctx);
 
         /* Toolbar consequences run after the main window closes so dialogs are
          * never opened from inside another window's draw. */
@@ -939,8 +908,7 @@ main(int argc, char **argv)
             }
         }
 
-        SDL_SetRenderDrawColor(ren, 24, 24, 28, 255);
-        SDL_RenderClear(ren);
+        mp_theme_backdrop(ren, px_w, px_h, &theme);
         nk_sdl_render(NK_ANTI_ALIASING_ON);
         SDL_RenderPresent(ren);
     }
@@ -955,6 +923,7 @@ main(int argc, char **argv)
     file_browser_destroy(browser);
     playback_shutdown();
     nk_sdl_shutdown();
+    mp_theme_shutdown(&theme);
     SDL_DestroyRenderer(ren);
     SDL_DestroyWindow(win);
     SDL_Quit();
