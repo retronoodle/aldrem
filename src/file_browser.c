@@ -11,6 +11,7 @@
 #define _XOPEN_SOURCE 700
 #include "file_browser.h"
 #include "nuklear_config.h"
+#include "theme.h"
 #include "track.h"
 
 #include <ctype.h>
@@ -325,9 +326,16 @@ fb_s(float v, float scale)
     return lroundf(v * scale);
 }
 
+/* Footer press state: kept here rather than on the stack so a press that spans
+ * frames still resolves. Nuklear is immediate-mode, so nothing survives a
+ * frame unless we hold it. */
+static struct MpAnim fb_open_anim;
+static struct MpAnim fb_cancel_anim;
+
 int
 file_browser_draw(FileBrowser *fb, struct nk_context *ctx, float scale,
-    float screen_w, float screen_h, char *out, size_t outlen)
+    struct MpTheme *theme, float dt, float screen_w, float screen_h,
+    char *out, size_t outlen)
 {
     struct nk_rect bounds;
     float row_h, footer_h, spacing, margin, list_h;
@@ -419,14 +427,31 @@ file_browser_draw(FileBrowser *fb, struct nk_context *ctx, float scale,
             chosen = activate;
 
         nk_layout_row_dynamic(ctx, footer_h, 2);
-        if (fb->selected < 0 || loading)
-            nk_widget_disable_begin(ctx);
-        if (nk_button_label(ctx, "Open"))
-            chosen = fb->selected;
-        if (fb->selected < 0 || loading)
-            nk_widget_disable_end(ctx);
-        if (nk_button_label(ctx, "Cancel"))
-            cancelled = 1;
+        if (theme) {
+            /* Themed footer: Open is primary, Cancel neutral. The theme is
+             * NULL until Phase 6 wires it, so stock buttons stay the default.
+             * dt is the caller's frame time: the easing needs it to move. */
+            struct MpButtonOpts opt;
+
+            opt.focus_slot = 0;
+            opt.dt = dt;
+            if (mp_button(ctx, scale, theme, "Open", MP_BTN_PRIMARY,
+                          MP_ICON_PLAY, 0, fb->selected >= 0 && !loading,
+                          &fb_open_anim, &opt))
+                chosen = fb->selected;
+            if (mp_button(ctx, scale, theme, "Cancel", MP_BTN_NEUTRAL,
+                          MP_ICON_STOP, 0, 1, &fb_cancel_anim, &opt))
+                cancelled = 1;
+        } else {
+            if (fb->selected < 0 || loading)
+                nk_widget_disable_begin(ctx);
+            if (nk_button_label(ctx, "Open"))
+                chosen = fb->selected;
+            if (fb->selected < 0 || loading)
+                nk_widget_disable_end(ctx);
+            if (nk_button_label(ctx, "Cancel"))
+                cancelled = 1;
+        }
     }
     nk_end(ctx);
 
