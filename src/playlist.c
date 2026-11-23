@@ -571,6 +571,19 @@ playlist_add(Playlist *pl, const char *path)
         return 0;
     }
 
+    /* Already listed: never add it twice. An idle player still starts it, so a
+     * CLI arg or drop of a known track keeps its autoplay. */
+    for (index = 0; index < pl->count; index++) {
+        const char *have = playlist_path_at(pl, index);
+
+        if (have && strcmp(have, resolved) == 0) {
+            playback_get_status(&st);
+            if (st.state == MP_STOPPED)
+                playlist_play_index(pl, index);
+            return 1;
+        }
+    }
+
     playback_get_status(&st);
     idle = st.state == MP_STOPPED;
 
