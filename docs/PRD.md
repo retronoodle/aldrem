@@ -13,7 +13,7 @@ A minimal desktop audio player for MP3 and WAV files, written in pure C with SDL
 ## Non-goals
 
 - Library management, a named-playlist library, repeat/shuffle, or reordering the queue.
-- Visualizations, theming, or skins.
+- Theming or skins. (A visualizer tab is in scope: see `docs/PRD-visualizer.md`.)
 - Formats beyond WAV, MP3, FLAC, Ogg Vorbis and AIFF (Opus and AAC/ALAC are deferred).
 - Tag editing or metadata display beyond the filename.
 - Windows support (happy accident if it happens, not a requirement).

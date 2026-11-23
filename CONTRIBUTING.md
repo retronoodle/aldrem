@@ -47,7 +47,9 @@ Useful targets: `make run`, `make install` (`PREFIX=...` to relocate), `make app
 | `src/playback.c` | audio device, decoder thread, ring buffer, volume, seeking |
 | `src/playlist.c` | queue model, `.m3u` read/write, autosave, auto-advance |
 | `src/vu.c` | level-meter maths (dB mapping, ballistics); pure, no SDL |
-| `src/settings.c` | persisted preferences in `settings.ini`; pure file I/O |
+| `src/viz.c` | visualizer maths (FFT, log bars, smoothing, hue, fractal constant); pure, no SDL |
+| `src/visualizer.c` | Visualizer tab and fullscreen drawing; Nuklear canvas and one fractal texture |
+| `src/settings.c` | persisted preferences in `settings.ini` (meter style, visualizer); pure file I/O |
 | `src/track.c` | format detection (extension + magic bytes) and dispatch |
 | `src/track_*.c` | one decoder per format |
 | `src/file_browser.c` | minimal in-app directory browser |

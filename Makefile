@@ -35,7 +35,7 @@ endif
 TARGET  := aldrem
 SRC := src/main.c src/playback.c src/track.c src/track_wav.c src/track_mp3.c \
        src/track_flac.c src/track_ogg.c src/track_aiff.c src/file_browser.c \
-       src/playlist.c src/theme.c src/vu.c src/settings.c src/finder.c \
+       src/playlist.c src/theme.c src/vu.c src/viz.c src/visualizer.c src/settings.c src/finder.c \
        src/net.c src/radio.c src/radio_search.c src/track_stream.c \
        src/track_stream_aac.c src/tags.c vendor/stb_vorbis.c
 OBJ := $(patsubst %.c,build/obj/%.o,$(SRC))
@@ -72,7 +72,7 @@ endif
 endif
 
 HDR := src/playback.h src/track.h src/track_internal.h src/track_stream_internal.h \
-       src/file_browser.h src/playlist.h src/theme.h src/vu.h src/settings.h \
+       src/file_browser.h src/playlist.h src/theme.h src/vu.h src/viz.h src/visualizer.h src/settings.h \
        src/finder.h src/net.h src/tags.h src/radio.h src/radio_search.h vendor/jsmn.h \
        src/nuklear_config.h vendor/nuklear.h \
        vendor/nuklear_sdl_renderer.h vendor/minimp3.h vendor/dr_flac.h \
@@ -174,6 +174,10 @@ tests/test_load: tests/test_load.c $(TEST_OBJ)
 tests/test_vu: tests/test_vu.c src/vu.c src/vu.h
 	$(CC) $(CFLAGS) -Isrc -o $@ tests/test_vu.c src/vu.c $(LDLIBS)
 
+# Visualizer maths: FFT, bars, smoothing, colour; no device.
+tests/test_viz: tests/test_viz.c src/viz.c src/viz.h
+	$(CC) $(CFLAGS) -Isrc -o $@ tests/test_viz.c src/viz.c $(LDLIBS)
+
 tests/test_settings: tests/test_settings.c src/settings.c src/settings.h
 	$(CC) $(CFLAGS) -Isrc -o $@ tests/test_settings.c src/settings.c $(LDLIBS)
 
@@ -210,8 +214,9 @@ endif
 # build never needs python3. `make test FIXTURE=path/to.wav` runs it.
 # The decoder round-trip opens a device, so pin the dummy driver: CI runners
 # and headless boxes have no sound card, and decoding does not need one.
-test: $(TARGET) tests/test_load tests/test_vu tests/test_settings tests/test_finder tests/test_radio tests/test_stream tests/test_playlist tests/test_tags $(TEST_NET_BIN)
+test: $(TARGET) tests/test_load tests/test_vu tests/test_viz tests/test_settings tests/test_finder tests/test_radio tests/test_stream tests/test_playlist tests/test_tags $(TEST_NET_BIN)
 	./tests/test_vu
+	./tests/test_viz
 	./tests/test_radio
 	./tests/test_stream tests/data
 	./tests/test_tags
@@ -227,6 +232,6 @@ test: $(TARGET) tests/test_load tests/test_vu tests/test_settings tests/test_fin
 	sh tests/smoke.sh ./$(TARGET)
 
 clean:
-	rm -rf build/obj tests/test_load tests/test_vu tests/test_settings tests/test_finder tests/test_radio tests/test_stream tests/test_playlist tests/test_tags tests/test_net $(TARGET)
+	rm -rf build/obj tests/test_load tests/test_vu tests/test_viz tests/test_settings tests/test_finder tests/test_radio tests/test_stream tests/test_playlist tests/test_tags tests/test_net $(TARGET)
 
 .PHONY: run clean build build-obj install uninstall app test $(DESKTOP)

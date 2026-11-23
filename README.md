@@ -54,13 +54,16 @@ Format detection works by extension, with magic-byte sniffing as a fallback — 
 | `Space`         | Play / pause               |
 | `←` / `→`       | Seek back / forward 5 s    |
 | `↑` / `↓`       | Volume up / down 5%        |
-| `Esc`           | Close a dialog, then quit  |
+| `F11`           | Toggle visualizer fullscreen |
+| `Esc`           | Leave fullscreen, close a dialog, then quit |
 | Drag & drop     | Append; play when idle     |
 | Click a row     | Select it (Remove targets it) |
 | Double-click    | Play that row immediately  |
 | Prev / Next     | Previous / next entry      |
 
 The top-right meter shows stereo output levels as twin needles or LED bars. Click its `Needle` / `LED` chip to switch; the choice is saved to `$XDG_CONFIG_HOME/aldrem/settings.ini` (falling back to `~/.config/aldrem/`).
+
+The lower band has a `Playlist` and a `Visualizer` tab. The visualizer draws the spectrum, a waveform or a fractal, shows the track name, and has sliders for gain, smoothing, bar count and hue. Its `Fullscreen` button (or `F11`) fills the screen and keeps the track name on it; the settings are saved with the meter style.
 
 The progress and volume sliders are live: seek mid-track, adjust volume, and it takes effect immediately. Keys are global except while a dialog or the file browser is open, so typing a path works.
 
@@ -116,7 +119,9 @@ main.c            SDL window, event loop, Nuklear UI, global shortcuts
 playback.c        audio device, decoder thread, ring buffer, volume, seeking
 playlist.c        queue model, .m3u read/write, autosave, auto-advance
 vu.c              level-meter maths: dB mapping, needle and peak ballistics
-settings.c        persisted preferences (meter style) in settings.ini
+viz.c             visualizer maths: FFT, log bars, smoothing; pure, no SDL
+visualizer.c      visualizer tab and fullscreen drawing (canvas + fractal texture)
+settings.c        persisted preferences (meter style, visualizer) in settings.ini
 track.c           format detection + dispatch to the right decoder
 track_*.c         one small implementation per format
 file_browser.c    minimal in-app directory browser

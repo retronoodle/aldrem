@@ -58,6 +58,11 @@ void playback_set_volume(int percent);
 /* Adds delta to the volume percentage, clamped to [0, 100]. */
 void playback_adjust_volume(int delta);
 void playback_get_status(PlaybackStatus *out);
+/* Copies the most recent n mono samples (post-volume, -1..1, oldest first) into
+ * out for the visualizer. Zeros unless PLAYING. Returns n (clamped to the tap
+ * size). Lock-free; samples may be slightly torn across a callback boundary,
+ * which is fine for display. */
+int  playback_get_samples(float *out, int n);
 /* Non-consuming: unlike playback_get_status, leaves a pending EOF alone. */
 int  playback_is_live(void);
 

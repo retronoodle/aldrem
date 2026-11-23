@@ -4,6 +4,7 @@
 #include "settings.h"
 
 #include <errno.h>
+#include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -58,39 +59,48 @@ settings_path(char *out, size_t outlen, int create)
     return 0;
 }
 
-MeterStyle
-settings_meter_style(void)
+/* Reads the value for key into out. Returns 1 when found, 0 otherwise. */
+static int
+kv_get(const char *key, char *out, size_t outlen)
 {
     char path[SET_PATH_MAX];
     char line[SET_LINE_MAX];
-    MeterStyle style = METER_LED;
+    size_t klen = strlen(key);
+    int found = 0;
     FILE *f;
 
     if (settings_path(path, sizeof path, 0) != 0)
-        return style;
+        return 0;
     f = fopen(path, "r");
     if (!f)
-        return style;
+        return 0;
 
     while (fgets(line, sizeof line, f)) {
         /* Trim the trailing newline before comparing the value. */
         line[strcspn(line, "\r\n")] = '\0';
-        if (strcmp(line, "meter_style=needle") == 0)
-            style = METER_NEEDLE;
-        else if (strcmp(line, "meter_style=led") == 0)
-            style = METER_LED;
+        if (strncmp(line, key, klen) == 0 && line[klen] == '=') {
+            snprintf(out, outlen, "%s", line + klen + 1);
+            found = 1; /* last occurrence wins */
+        }
     }
     fclose(f);
-    return style;
+    return found;
 }
 
-int
-settings_set_meter_style(MeterStyle style)
+/* Sets key to value, keeping every other line in the file. Written through a
+ * temp file and renamed, so a crash cannot leave a half-written settings file.
+ * Returns 0 on success, -1 on failure. */
+static int
+kv_set(const char *key, const char *value)
 {
     char path[SET_PATH_MAX];
     char tmp[SET_PATH_MAX + 8];
-    FILE *f;
-    int bad = 0;
+    char *line = NULL;
+    size_t cap = 0;
+    ssize_t len;
+    size_t klen = strlen(key);
+    int bad = 0, wrote = 0;
+    FILE *in, *f;
 
     if (settings_path(path, sizeof path, 1) != 0)
         return -1;
@@ -100,7 +110,28 @@ settings_set_meter_style(MeterStyle style)
     f = fopen(tmp, "w");
     if (!f)
         return -1;
-    fprintf(f, "meter_style=%s\n", style == METER_NEEDLE ? "needle" : "led");
+
+    /* Copy the existing file, replacing the key's line in place. */
+    in = fopen(path, "r");
+    if (in) {
+        /* getline keeps long lines whole, so unrelated lines survive intact. */
+        while ((len = getline(&line, &cap, in)) != -1) {
+            if (len > 0 && line[len - 1] == '\n')
+                line[len - 1] = '\0';
+            if (strncmp(line, key, klen) == 0 && line[klen] == '=') {
+                if (!wrote)
+                    fprintf(f, "%s=%s\n", key, value);
+                wrote = 1;
+            } else {
+                fprintf(f, "%s\n", line);
+            }
+        }
+        fclose(in);
+    }
+    free(line);
+    if (!wrote)
+        fprintf(f, "%s=%s\n", key, value);
+
     if (ferror(f))
         bad = 1;
     /* Flush to disk before the rename so a power cut cannot leave an empty
@@ -114,4 +145,51 @@ settings_set_meter_style(MeterStyle style)
         return -1;
     }
     return 0;
+}
+
+MeterStyle
+settings_meter_style(void)
+{
+    char v[SET_LINE_MAX];
+
+    if (kv_get("meter_style", v, sizeof v)) {
+        if (strcmp(v, "needle") == 0)
+            return METER_NEEDLE;
+    }
+    return METER_LED;
+}
+
+int
+settings_set_meter_style(MeterStyle style)
+{
+    return kv_set("meter_style", style == METER_NEEDLE ? "needle" : "led");
+}
+
+int
+settings_get_int(const char *key, int def)
+{
+    char v[SET_LINE_MAX];
+    char *end;
+    long n;
+
+    if (!kv_get(key, v, sizeof v))
+        return def;
+    errno = 0;
+    n = strtol(v, &end, 10);
+    /* Out of long or int range is not a usable value; keep the default
+     * rather than truncating it. */
+    if (end == v || *end != '\0' || errno == ERANGE)
+        return def;
+    if (n < INT_MIN || n > INT_MAX)
+        return def;
+    return (int)n;
+}
+
+int
+settings_set_int(const char *key, int value)
+{
+    char v[32];
+
+    snprintf(v, sizeof v, "%d", value);
+    return kv_set(key, v);
 }

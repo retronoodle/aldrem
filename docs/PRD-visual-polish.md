@@ -33,8 +33,8 @@ exactly **one** designed theme; it does not add a theme system or user skins.
 
 - No user-selectable themes, skins, or light mode (a second theme is a separate
   project once the palette layer exists).
-- No audio visualiser, waveform, spectrum, or real-time analysis — still a
-  non-goal from `docs/PRD.md`.
+- No audio visualiser in this pass. The visualizer tab is specified separately
+  in `docs/PRD-visualizer.md`.
 - No album art, tag reading, playlist UI, or metadata beyond today's status line.
 - No window chrome redesign (the OS title bar stays).
 - No bundled custom font in this pass. The built-in Nuklear font stays; a nicer

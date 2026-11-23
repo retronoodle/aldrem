@@ -30,6 +30,8 @@
 #include "settings.h"
 #include "theme.h"
 #include "track.h"
+#include "viz.h"
+#include "visualizer.h"
 
 #define UI_DENSITY 0.8f
 #define UI_FONT_BASE 19.0f
@@ -299,10 +301,7 @@ ui_column(struct nk_rect frame, float scale)
 /* The whole playlist band: heading, toolbar, scrolling rows. Returns toolbar
  * actions whose consequences live in main() (browser/modal state). Remove,
  * Clear and double-click are applied after the row loop so the array that
- * nk_list_view indexed cannot change mid-draw.
- *
- * Deliberately one function: issue #3 will move this panel under a tab without
- * touching the layout maths. */
+ * nk_list_view indexed cannot change mid-draw. Shown under the Playlist tab. */
 /* Extensions shown as chips in the empty playlist. */
 static const char *const ui_ext_chips[] = {
     ".wav", ".mp3", ".flac", ".ogg", ".aiff", ".aif", ".aifc"
@@ -474,6 +473,9 @@ enum {
     UI_TAB_PLAY,
     UI_TAB_STOP,
     UI_TAB_NEXT,
+    UI_TAB_SHOW_PL,   /* Playlist / Visualizer tabs above the lower band */
+    UI_TAB_SHOW_VIZ,
+    UI_TAB_FULLSCREEN,
     UI_TAB_LAST
 };
 
@@ -489,12 +491,112 @@ struct UiButtons {
     /* Meter style toggle and the meter's needle/peak ballistics. */
     struct MpAnim vu;
     struct MpVuAnim meter;
+    /* Playlist / Visualizer tab buttons. */
+    struct MpAnim tab_pl, tab_viz;
     struct MpButtonOpts opt; /* focus slot and dt, refilled each frame */
     /* The focused slot; UI_TAB_NONE = nobody. Tab is the only focus key the
      * app consumes: Enter is left to Nuklear so edit fields and popups keep
      * theirs, which also keeps its keyboard counters at one tick per press. */
     int focus;
 };
+
+/* Fullscreen follows the window's own flag, so an exit by the window manager
+ * is seen as well as F11 and the Fullscreen button. */
+static int
+win_fullscreen(SDL_Window *win)
+{
+    return (SDL_GetWindowFlags(win) & SDL_WINDOW_FULLSCREEN_DESKTOP)
+        == SDL_WINDOW_FULLSCREEN_DESKTOP;
+}
+
+static void
+viz_set_fullscreen(SDL_Window *win, int on)
+{
+    SDL_SetWindowFullscreen(win, on ? SDL_WINDOW_FULLSCREEN_DESKTOP : 0);
+}
+
+/* Persists the visualizer settings and the active bottom tab. */
+static void
+ui_save_viz(const VizSettings *s, int bottom_tab)
+{
+    int bad = 0;
+
+    bad |= settings_set_int("viz_mode", s->mode) != 0;
+    bad |= settings_set_int("viz_gain", s->gain_pct) != 0;
+    bad |= settings_set_int("viz_smooth", s->smooth_pct) != 0;
+    bad |= settings_set_int("viz_bars", s->bars) != 0;
+    bad |= settings_set_int("viz_hue", s->hue_pct) != 0;
+    bad |= settings_set_int("active_tab", bottom_tab) != 0;
+    if (bad)
+        SDL_Log("settings: cannot save visualizer settings");
+}
+
+/* The Visualizer tab in the lower band: the visual, then its controls. Returns
+ * the VIZ_CTRL_* bits for the caller to act on. */
+static int
+ui_viz_panel(struct nk_context *ctx, float scale, const struct MpTheme *th,
+    VizView *v, VizSettings *s, const char *title, int enabled,
+    const struct MpButtonOpts *opt, int fs_slot)
+{
+    float row_h = mp_s(PL_ROW_H, scale);
+    float canvas_h;
+
+    if (!v) {
+        nk_layout_row_dynamic(ctx, row_h, 1);
+        mp_label_muted(ctx, th, "Visualizer unavailable", NK_TEXT_LEFT);
+        return 0;
+    }
+    canvas_h = ui_list_height(ctx, scale, row_h)
+        - viz_view_controls_height(ctx, scale) - mp_s(4.0f, scale);
+    if (canvas_h < mp_s(120.0f, scale))
+        canvas_h = mp_s(120.0f, scale);
+    nk_layout_row_dynamic(ctx, canvas_h, 1);
+    viz_view_draw(ctx, th, v, s, title);
+    return viz_view_controls(ctx, scale, th, v, s, fs_slot, enabled, opt);
+}
+
+/* Fullscreen: the visual fills the window and carries the track name. The
+ * controls float along the bottom while the pointer is moving. */
+static int
+ui_fullscreen_view(struct nk_context *ctx, float scale, const struct MpTheme *th,
+    VizView *v, VizSettings *s, const char *title, float w, float h,
+    int show_controls, const struct MpButtonOpts *opt, int fs_slot)
+{
+    const float margin = mp_s(16.0f, scale);
+    int flags = 0;
+
+    nk_style_push_style_item(ctx, &ctx->style.window.fixed_background,
+                             nk_style_item_hide());
+    nk_style_push_vec2(ctx, &ctx->style.window.padding, nk_vec2(0.0f, 0.0f));
+    nk_style_push_vec2(ctx, &ctx->style.window.spacing, nk_vec2(0.0f, 0.0f));
+    if (nk_begin(ctx, "vizfull", nk_rect(0.0f, 0.0f, w, h),
+                 NK_WINDOW_NO_SCROLLBAR)) {
+        nk_layout_row_dynamic(ctx, h, 1);
+        viz_view_draw(ctx, th, v, s, title);
+    }
+    nk_end(ctx);
+    nk_style_pop_vec2(ctx);
+    nk_style_pop_vec2(ctx);
+    nk_style_pop_style_item(ctx);
+
+    if (show_controls) {
+        const float pad = mp_s(12.0f, scale);
+        const float ch = viz_view_controls_height(ctx, scale) + 2.0f * pad;
+        struct nk_rect r = nk_rect(margin, h - ch - margin,
+                                   w - 2.0f * margin, ch);
+
+        nk_style_push_style_item(ctx, &ctx->style.window.fixed_background,
+            nk_style_item_color(mp_col_alpha(th->surface, 235)));
+        nk_style_push_vec2(ctx, &ctx->style.window.padding,
+                           nk_vec2(pad, pad));
+        if (nk_begin(ctx, "vizctl", r, NK_WINDOW_NO_SCROLLBAR))
+            flags = viz_view_controls(ctx, scale, th, v, s, fs_slot, 1, opt);
+        nk_end(ctx);
+        nk_style_pop_vec2(ctx);
+        nk_style_pop_style_item(ctx);
+    }
+    return flags;
+}
 
 /* Level meter pinned to the top-right corner of the frame. It is its own
  * window so it ignores the centred column; the header row reserves the same
@@ -1372,6 +1474,22 @@ main(int argc, char **argv)
     buttons.seek.handle = 1.0f;
     buttons.vol.handle = 1.0f;
 
+    /* Visualizer state: restored from settings, saved once the user settles. */
+    VizSettings vs;
+    int bottom_tab;
+    int vs_dirty = 0;
+    Uint32 vs_dirty_ms = 0;
+    Uint32 mouse_ms = 0;
+    VizView *vview = viz_view_create(ren);
+
+    vs.mode = settings_get_int("viz_mode", VIZ_SPECTRUM);
+    vs.gain_pct = settings_get_int("viz_gain", 100);
+    vs.smooth_pct = settings_get_int("viz_smooth", 60);
+    vs.bars = settings_get_int("viz_bars", 48);
+    vs.hue_pct = settings_get_int("viz_hue", 0);
+    viz_settings_clamp(&vs);
+    bottom_tab = settings_get_int("active_tab", 0) == 1 ? 1 : 0;
+
     /* Per-frame dt comes from the high-resolution counter (see the loop). */
     Uint64 last_ticks = SDL_GetPerformanceCounter();
 
@@ -1400,6 +1518,8 @@ main(int argc, char **argv)
              * ring should not linger on a button the mouse did not pick. */
             if (evt.type == SDL_MOUSEBUTTONDOWN)
                 buttons.focus = UI_TAB_NONE;
+            if (evt.type == SDL_MOUSEMOTION)
+                mouse_ms = SDL_GetTicks(); /* shows fullscreen controls */
 
             if (evt.type == SDL_QUIT) {
                 running = 0;
@@ -1411,11 +1531,19 @@ main(int argc, char **argv)
                         SDL_Log("drop queue allocation failed; file skipped");
                     SDL_free(evt.drop.file);
                 }
+            } else if (!modal_active && evt.type == SDL_KEYDOWN &&
+                       !evt.key.repeat &&
+                       evt.key.keysym.scancode == SDL_SCANCODE_F11) {
+                consumed = 1;
+                viz_set_fullscreen(win, !win_fullscreen(win));
             } else if (evt.type == SDL_KEYDOWN && !evt.key.repeat &&
                        evt.key.keysym.scancode == SDL_SCANCODE_ESCAPE) {
                 /* Esc closes the newest modal first, then the browser, then
                  * the window. */
-                if (save_modal_open) {
+                if (win_fullscreen(win)) {
+                    /* Esc leaves fullscreen first, then behaves as before. */
+                    viz_set_fullscreen(win, 0);
+                } else if (save_modal_open) {
                     save_modal_open = 0;
                     SDL_StopTextInput();
                 } else if (finder_open) {
@@ -1437,9 +1565,20 @@ main(int argc, char **argv)
                  * Consumed so Nuklear's edit fields never see it; the modal
                  * gate above keeps Tab in text entry while a dialog is up. */
                 consumed = 1;
-                buttons.focus++;
-                if (buttons.focus >= UI_TAB_LAST)
-                    buttons.focus = UI_TAB_OPEN;
+                if (win_fullscreen(win)) {
+                    /* Fullscreen draws only its own view and Fullscreen
+                     * button, so that is the one slot Tab can land on. */
+                    buttons.focus = UI_TAB_FULLSCREEN;
+                } else {
+                    buttons.focus++;
+                    /* Fullscreen's button is only drawn on the Visualizer tab;
+                     * skip its slot elsewhere so Tab never stalls on an
+                     * invisible button. */
+                    if (buttons.focus == UI_TAB_FULLSCREEN && bottom_tab != 1)
+                        buttons.focus++;
+                    if (buttons.focus >= UI_TAB_LAST)
+                        buttons.focus = UI_TAB_OPEN;
+                }
             } else if (!modal_active && evt.type == SDL_KEYDOWN &&
                        evt.key.repeat &&
                        (evt.key.keysym.scancode == SDL_SCANCODE_RETURN ||
@@ -1538,6 +1677,13 @@ main(int argc, char **argv)
         }
         buttons.opt.focus_slot = buttons.focus;
 
+        /* Fullscreen is read from the window every frame, so a window-manager
+         * exit is seen too. The visual is only fed while it is on screen. */
+        const int fs_now = win_fullscreen(win);
+        if (vview)
+            viz_view_update(vview, &vs, buttons.opt.dt,
+                            fs_now || bottom_tab == 1, theme.reduce_motion);
+
         /* Coalesce arrow-key repeats into one decoder rebuild per frame; this
          * runs before the status fetch so the label reflects the new position
          * immediately. */
@@ -1616,6 +1762,9 @@ main(int argc, char **argv)
             }
         }
 
+        /* The visual names the track; with nothing loaded it says so. */
+        const char *viz_title = st.has_track ? base : "Nothing playing";
+
         /* Header chips: the same decoded fields as before, one chip each. */
         if (st.has_track) {
             if (st.codec[0])
@@ -1655,85 +1804,132 @@ main(int argc, char **argv)
             snprintf(window_title, sizeof window_title, "%s", title);
         }
 
-        /* The root window is the frame itself, so hide its fill here (not in
-         * the shared style) to let the backdrop show through. Panels and
-         * dialogs drawn inside keep their surface. */
-        nk_style_push_style_item(ctx, &ctx->style.window.fixed_background,
-                                 nk_style_item_hide());
-        float header_y = 0.0f;
+        if (!fs_now) {
+            /* The root window is the frame itself, so hide its fill here (not in
+             * the shared style) to let the backdrop show through. Panels and
+             * dialogs drawn inside keep their surface. */
+            nk_style_push_style_item(ctx, &ctx->style.window.fixed_background,
+                                     nk_style_item_hide());
+            float header_y = 0.0f;
 
-        if (nk_begin(ctx, "aldrem",
-                     nk_rect(0, 0, (float)px_w, (float)px_h),
-                     NK_WINDOW_NO_SCROLLBAR))
-        {
-            /* Everything lays out inside the centred column; the window and
-             * the backdrop still cover the whole frame. */
-            struct nk_rect col = ui_column(nk_window_get_content_region(ctx),
-                                           ui_scale);
+            if (nk_begin(ctx, "aldrem",
+                         nk_rect(0, 0, (float)px_w, (float)px_h),
+                         NK_WINDOW_NO_SCROLLBAR))
+            {
+                /* Everything lays out inside the centred column; the window and
+                 * the backdrop still cover the whole frame. */
+                struct nk_rect col = ui_column(nk_window_get_content_region(ctx),
+                                               ui_scale);
 
-            /* header: Open button + status; inert while a dialog is up. The
-             * right cell is left blank for the level meter overlay. */
-            header_y = nk_window_get_content_region(ctx).y;
-            nk_layout_row_template_begin(ctx, mp_s(UI_VU_H, ui_scale));
-            nk_layout_row_template_push_static(ctx, mp_s(90.0f, ui_scale));
-            nk_layout_row_template_push_dynamic(ctx);
-            nk_layout_row_template_push_static(ctx,
-                                               mp_s(UI_VU_RESERVE, ui_scale));
-            nk_layout_row_template_end(ctx);
-            if (mp_button(ctx, ui_scale, &theme, "Open", MP_BTN_PRIMARY,
-                          MP_ICON_PLAY, UI_TAB_OPEN,
-                          browser && !modal_active, &buttons.open,
-                          &buttons.opt)) {
-                browser_list_mode = 0;
-                file_browser_open(browser,
-                                  st.has_track && !st.is_live ? st.name : NULL);
+                /* header: Open button + status; inert while a dialog is up. The
+                 * right cell is left blank for the level meter overlay. */
+                header_y = nk_window_get_content_region(ctx).y;
+                nk_layout_row_template_begin(ctx, mp_s(UI_VU_H, ui_scale));
+                nk_layout_row_template_push_static(ctx, mp_s(90.0f, ui_scale));
+                nk_layout_row_template_push_dynamic(ctx);
+                nk_layout_row_template_push_static(ctx,
+                                                   mp_s(UI_VU_RESERVE, ui_scale));
+                nk_layout_row_template_end(ctx);
+                if (mp_button(ctx, ui_scale, &theme, "Open", MP_BTN_PRIMARY,
+                              MP_ICON_PLAY, UI_TAB_OPEN,
+                              browser && !modal_active, &buttons.open,
+                              &buttons.opt)) {
+                    browser_list_mode = 0;
+                    file_browser_open(browser,
+                                      st.has_track && !st.is_live ? st.name : NULL);
+                }
+                if (st.error[0])
+                    mp_error_panel(ctx, ui_scale, &theme, st.error);
+                else
+                    mp_status_row(ctx, ui_scale, &theme,
+                                  st.has_track ? base : NULL, chips, nchips,
+                                  play_ps);
+
+                /* The dock holds time, seek, transport and volume; its content
+                 * height is the four rows plus the three 4 pt gaps between them.
+                 * The rows only draw when the group opened, and mp_dock_end must
+                 * follow only when it did: a skipped begin never opened the group
+                 * or pushed the group styles, so an unconditional end would pop
+                 * an empty stack and close a group that was never begun. */
+                dock_open = mp_dock_begin(ctx, ui_scale, col,
+                    mp_s(157.0f, ui_scale) + 3.0f * mp_s(4.0f, ui_scale),
+                    &theme);
+                if (dock_open) {
+                    double seek = 0.0;
+
+                    if (ui_transport_panel(ctx, ui_scale, &theme, &st, pl,
+                                           modal_active,
+                                           st.has_track ? base : NULL,
+                                           curbuf, totbuf, progress,
+                                           volbuf, &seek_dragging,
+                                           &seek_preview, &buttons, &seek))
+                        playback_seek(seek);
+                }
+
+                /* The playlist band sits below the dock, in the same column, and
+                 * takes whatever height is left. Only touched once the dock
+                 * closed: mp_dock_end restores the shared style before it draws. */
+                if (dock_open)
+                    mp_dock_end(ctx);
+                nk_layout_row_dynamic(ctx, mp_s(4.0f, ui_scale), 1);
+
+                /* Playlist / Visualizer tabs: one row, two equal cells. */
+                nk_layout_row_dynamic(ctx,
+                    mp_s(mp_button_height(MP_BTN_NEUTRAL), ui_scale), 2);
+                if (mp_button(ctx, ui_scale, &theme, "Playlist",
+                              bottom_tab == 0 ? MP_BTN_PRIMARY : MP_BTN_NEUTRAL,
+                              MP_ICON_PLAY, UI_TAB_SHOW_PL, !modal_active,
+                              &buttons.tab_pl, &buttons.opt) && bottom_tab != 0) {
+                    bottom_tab = 0;
+                    vs_dirty = 1;
+                    vs_dirty_ms = SDL_GetTicks();
+                }
+                if (mp_button(ctx, ui_scale, &theme, "Visualizer",
+                              bottom_tab == 1 ? MP_BTN_PRIMARY : MP_BTN_NEUTRAL,
+                              MP_ICON_PLAY, UI_TAB_SHOW_VIZ, !modal_active,
+                              &buttons.tab_viz, &buttons.opt) && bottom_tab != 1) {
+                    bottom_tab = 1;
+                    vs_dirty = 1;
+                    vs_dirty_ms = SDL_GetTicks();
+                }
+
+                if (bottom_tab == 0) {
+                    panel_actions = ui_playlist_panel(pl, ctx, ui_scale,
+                                                      modal_active, finder != NULL,
+                                                      radio != NULL && net_available(),
+                                                      &theme, st.has_track);
+                } else {
+                    int vflags = ui_viz_panel(ctx, ui_scale, &theme, vview, &vs,
+                                              viz_title, !modal_active,
+                                              &buttons.opt, UI_TAB_FULLSCREEN);
+                    if (vflags & VIZ_CTRL_CHANGED) {
+                        vs_dirty = 1;
+                        vs_dirty_ms = SDL_GetTicks();
+                    }
+                    if (vflags & VIZ_CTRL_FULLSCREEN)
+                        viz_set_fullscreen(win, 1);
+                }
             }
-            if (st.error[0])
-                mp_error_panel(ctx, ui_scale, &theme, st.error);
-            else
-                mp_status_row(ctx, ui_scale, &theme,
-                              st.has_track ? base : NULL, chips, nchips,
-                              play_ps);
+            nk_end(ctx);
+            nk_style_pop_style_item(ctx);
 
-            /* The dock holds time, seek, transport and volume; its content
-             * height is the four rows plus the three 4 pt gaps between them.
-             * The rows only draw when the group opened, and mp_dock_end must
-             * follow only when it did: a skipped begin never opened the group
-             * or pushed the group styles, so an unconditional end would pop
-             * an empty stack and close a group that was never begun. */
-            dock_open = mp_dock_begin(ctx, ui_scale, col,
-                mp_s(157.0f, ui_scale) + 3.0f * mp_s(4.0f, ui_scale),
-                &theme);
-            if (dock_open) {
-                double seek = 0.0;
-
-                if (ui_transport_panel(ctx, ui_scale, &theme, &st, pl,
-                                       modal_active,
-                                       st.has_track ? base : NULL,
-                                       curbuf, totbuf, progress,
-                                       volbuf, &seek_dragging,
-                                       &seek_preview, &buttons, &seek))
-                    playback_seek(seek);
-            }
-
-            /* The playlist band sits below the dock, in the same column, and
-             * takes whatever height is left. Only touched once the dock
-             * closed: mp_dock_end restores the shared style before it draws. */
-            if (dock_open)
-                mp_dock_end(ctx);
-            nk_layout_row_dynamic(ctx, mp_s(4.0f, ui_scale), 1);
-            panel_actions = ui_playlist_panel(pl, ctx, ui_scale, modal_active,
-                                              finder != NULL,
-                                              radio != NULL && net_available(),
-                                              &theme, st.has_track);
+            /* Meter overlay sits above the main window, pinned to the frame's top
+             * right. It stays live while a dialog is up; only its toggle is gated. */
+            ui_vu_overlay(ctx, ui_scale, &theme, (float)px_w, header_y,
+                          &meter_style, &buttons, &st, !modal_active);
         }
-        nk_end(ctx);
-        nk_style_pop_style_item(ctx);
-
-        /* Meter overlay sits above the main window, pinned to the frame's top
-         * right. It stays live while a dialog is up; only its toggle is gated. */
-        ui_vu_overlay(ctx, ui_scale, &theme, (float)px_w, header_y,
-                      &meter_style, &buttons, &st, !modal_active);
+        if (fs_now && vview) {
+            int fs_flags = ui_fullscreen_view(ctx, ui_scale, &theme,
+                vview, &vs, viz_title, (float)px_w, (float)px_h,
+                SDL_GetTicks() - mouse_ms < 3000, &buttons.opt,
+                UI_TAB_FULLSCREEN);
+            if (fs_flags & VIZ_CTRL_CHANGED) {
+                vs_dirty = 1;
+                vs_dirty_ms = SDL_GetTicks();
+            }
+            if (fs_flags & VIZ_CTRL_FULLSCREEN)
+                viz_set_fullscreen(win, 0);
+        }
 
         /* Toolbar consequences run after the main window closes so dialogs are
          * never opened from inside another window's draw. */
@@ -1829,6 +2025,12 @@ main(int argc, char **argv)
             }
         }
 
+        /* Settings are written once the slider settles, not on every frame. */
+        if (vs_dirty && SDL_GetTicks() - vs_dirty_ms > 500) {
+            ui_save_viz(&vs, bottom_tab);
+            vs_dirty = 0;
+        }
+
         mp_theme_backdrop(ren, px_w, px_h, &theme);
         nk_sdl_render(NK_ANTI_ALIASING_ON);
         SDL_RenderPresent(ren);
@@ -1836,6 +2038,8 @@ main(int argc, char **argv)
 
     /* Final autosave before the engine and SDL go away; the playlist only
      * touches playback_stop/load, both of which need a live engine. */
+    if (vs_dirty)
+        ui_save_viz(&vs, bottom_tab);
     ui_drop_free_all(drops, drop_count);
     playlist_destroy(pl);
 
@@ -1847,6 +2051,7 @@ main(int argc, char **argv)
     playback_shutdown();
     nk_sdl_shutdown();
     mp_theme_shutdown(&theme);
+    viz_view_destroy(vview);
     SDL_DestroyRenderer(ren);
     SDL_DestroyWindow(win);
     SDL_Quit();

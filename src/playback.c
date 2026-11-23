@@ -27,6 +27,8 @@
 #define SCRATCH_BYTES   (64 * 1024)
 #define FEED_SECONDS    0.5
 #define LEVEL_SCALE     65536.0f  /* fixed-point scale for meter levels */
+#define VIZ_RING        (1 << 12) /* mono sample tap for the visualizer, power of 2 */
+#define VIZ_SCALE       32767     /* int16 fixed point per visualizer sample */
 
 struct Playback {
     int inited;
@@ -67,7 +69,13 @@ struct Playback {
     SDL_atomic_t lvl_rms_l;
     SDL_atomic_t lvl_rms_r;
 
-    float *ring;               /* RB_FRAMES frames, have.channels interleaved */
+    /* Mono post-volume sample tap for the visualizer. Each sample is an atomic
+     * int16 so the UI can read it without a lock or a data race; viz_write is
+     * the monotonic count of samples the callback has produced. */
+    SDL_atomic_t viz_ring[VIZ_RING];
+    SDL_atomic_t viz_write;
+
+    float *ring;              /* RB_FRAMES frames, have.channels interleaved */
     SDL_atomic_t rb_write;     /* monotonic frame counters */
     SDL_atomic_t rb_read;
     Uint8 *scratch;
@@ -198,6 +206,26 @@ audio_callback(void *userdata, Uint8 *stream, int len)
             SDL_AtomicSet(&p->lvl_peak_r, level_to_fixed(pk[1]));
             SDL_AtomicSet(&p->lvl_rms_l, level_to_fixed((float)sqrt(sq[0] / (float)n)));
             SDL_AtomicSet(&p->lvl_rms_r, level_to_fixed((float)sqrt(sq[1] / (float)n)));
+        }
+
+        /* Visualizer tap: mono mix (channel average) into the sample ring. */
+        {
+            int vw = SDL_AtomicGet(&p->viz_write);
+            int f;
+            for (f = 0; f < n; ++f) {
+                float m = 0.0f;
+                int c;
+                for (c = 0; c < ch; ++c)
+                    m += dst[f * ch + c];
+                m /= (float)ch;
+                if (m > 1.0f)
+                    m = 1.0f;
+                else if (m < -1.0f)
+                    m = -1.0f;
+                SDL_AtomicSet(&p->viz_ring[((Uint32)vw + (Uint32)f) & (VIZ_RING - 1)],
+                              (int)(m * VIZ_SCALE));
+            }
+            SDL_AtomicSet(&p->viz_write, (int)((Uint32)vw + (Uint32)n));
         }
 
         /* 32-bit counter: wraps after ~13 h at 44.1 kHz. Accepted for v1. */
@@ -700,6 +728,31 @@ int
 playback_is_live(void)
 {
     return g.inited && g.info.is_live;
+}
+
+int
+playback_get_samples(float *out, int n)
+{
+    int vw, i;
+
+    if (!out || n <= 0)
+        return 0;
+    if (n > VIZ_RING)
+        n = VIZ_RING;
+
+    /* Silence unless audio is flowing, mirroring the meter levels. */
+    if (!g.inited || SDL_AtomicGet(&g.state) != MP_PLAYING) {
+        for (i = 0; i < n; ++i)
+            out[i] = 0.0f;
+        return n;
+    }
+
+    vw = SDL_AtomicGet(&g.viz_write);
+    for (i = 0; i < n; ++i) {
+        const int idx = (int)((Uint32)vw - (Uint32)n + (Uint32)i) & (VIZ_RING - 1);
+        out[i] = (float)SDL_AtomicGet(&g.viz_ring[idx]) / VIZ_SCALE;
+    }
+    return n;
 }
 
 void
