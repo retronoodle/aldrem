@@ -6,6 +6,9 @@
  * clicked": nk_select_label toggles the value passed in, so the stored
  * selection is owned here, never read back from Nuklear.
  */
+/* realpath() is POSIX/XSI, not ISO C: -std=c99 hides it from glibc's headers
+ * unless a feature macro asks for it, which is why this is before any include. */
+#define _XOPEN_SOURCE 700
 #include "file_browser.h"
 #include "nuklear_config.h"
 #include "track.h"

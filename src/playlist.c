@@ -8,6 +8,9 @@
  * loads go through playback_load, which opens the candidate before touching the
  * live session.
  */
+/* realpath() is POSIX/XSI, not ISO C: -std=c99 hides it from glibc's headers
+ * unless a feature macro asks for it, which is why this is before any include. */
+#define _XOPEN_SOURCE 700
 #include "playlist.h"
 #include "playback.h"
 #include "track.h"
