@@ -1,6 +1,6 @@
 [Desktop Entry]
 Type=Application
-Name=mediaplayer
+Name=C-Side Media Player
 GenericName=Audio Player
 Comment=Minimal WAV/MP3/FLAC/Ogg/AIFF player
 Exec=@BINDIR@/mediaplayer %f
@@ -10,4 +10,4 @@ Categories=AudioVideo;Audio;Player;
 MimeType=audio/mpeg;audio/wav;audio/x-wav;audio/flac;audio/ogg;audio/x-vorbis+ogg;audio/aiff;audio/x-aiff;audio/x-aifc;
 StartupNotify=true
 StartupWMClass=mediaplayer
-Keywords=audio;music;player;mp3;wav;flac;ogg;vorbis;aiff;aif;
+Keywords=c-side;cside;audio;music;player;mp3;wav;flac;ogg;vorbis;aiff;aif;

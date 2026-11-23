@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""Render the mediaplayer icon to a square RGBA PNG.
+"""Render the C-Side Media Player icon to a square RGBA PNG.
 
 Stdlib-only (zlib, struct, math) so it works on machines with no
 rsvg-convert/inkscape/imagemagick. Mirrors packaging/mediaplayer.svg: a
-rounded-square background with a play triangle, drawn with 4x4
-supersampling for antialiased edges.
+rounded-square background with a thick C ring (gap on the right) and a play
+triangle whose apex pokes through the gap, drawn with 4x4 supersampling for
+antialiased edges.
 
 Usage: python3 packaging/make_icon.py build/icon-1024.png
 """
@@ -21,6 +22,21 @@ OUT_SIZE = 1024
 
 BG = (24, 24, 28, 255)
 ACCENT = (110, 150, 230, 255)
+
+# Ring geometry in design units: centred on the tile, 14 units thick, open on
+# the +x axis with an 80-degree gap, round caps (the SVG uses a round-capped
+# stroke, so the caps are discs of radius thickness/2 at the arc ends).
+RING_CX = 64.0
+RING_CY = 64.0
+RING_OUTER = 40.0
+RING_INNER = 26.0
+GAP_HALF_RAD = math.radians(40.0)
+
+# Play triangle: the base edge sits in the C's counter and the apex reaches
+# into the mouth of the C without bridging the gap.
+TRI_BASE_X = 56.0
+TRI_APEX_X = 88.0
+TRI_HALF_H = 20.0
 
 
 def fill_span(buf, row, x0, x1, width, pixel):
@@ -57,6 +73,49 @@ def draw_triangle(buf, width, top, right, bottom, pixel):
             t = (centre - right[1]) / (bottom[1] - right[1])
             right_x = right[0] + t * (bottom[0] - right[0])
         fill_span(buf, row, round(left_x), round(right_x), width, pixel)
+
+
+def draw_disc(buf, width, cx, cy, r, pixel):
+    """Filled circle, used for the round caps on the ring."""
+    for row in range(int(math.floor(cy - r)), int(math.ceil(cy + r))):
+        dy = (row + 0.5) - cy
+        if abs(dy) >= r:
+            continue
+        half = math.sqrt(r * r - dy * dy)
+        fill_span(buf, row, round(cx - half), round(cx + half), width, pixel)
+
+
+def draw_ring(buf, width, cx, cy, r_outer, r_inner, pixel):
+    """Annulus with a wedge erased on the +x side to form the C's gap.
+
+    The gap is erased with the tile background, which is safe because the
+    ring sits entirely inside the tile. Round caps are drawn afterwards so
+    they bulge back into the gap, matching the SVG's round stroke caps.
+    """
+    bg = bytes(BG)
+    tan_gap = math.tan(GAP_HALF_RAD)
+    top = int(math.floor(cy - r_outer))
+    bottom = int(math.ceil(cy + r_outer))
+    for row in range(top, bottom):
+        dy = (row + 0.5) - cy
+        if abs(dy) >= r_outer:
+            continue
+        outer = math.sqrt(r_outer * r_outer - dy * dy)
+        if abs(dy) < r_inner:
+            inner = math.sqrt(r_inner * r_inner - dy * dy)
+        else:
+            inner = 0.0
+        fill_span(buf, row, round(cx - outer), round(cx - inner), width, pixel)
+        fill_span(buf, row, round(cx + inner), round(cx + outer), width, pixel)
+        # Erase the wedge where |dy| <= dx * tan(gap), i.e. the right opening.
+        gap_x = cx + abs(dy) / tan_gap
+        fill_span(buf, row, round(gap_x), round(cx + outer), width, bg)
+    # Round caps: discs centred on the mid radius at the two arc ends.
+    mid = (r_outer + r_inner) / 2.0
+    cap_x = cx + mid * math.cos(GAP_HALF_RAD)
+    cap_dy = mid * math.sin(GAP_HALF_RAD)
+    draw_disc(buf, width, cap_x, cy - cap_dy, (r_outer - r_inner) / 2.0, pixel)
+    draw_disc(buf, width, cap_x, cy + cap_dy, (r_outer - r_inner) / 2.0, pixel)
 
 
 def downsample(buf, sw, size, factor):
@@ -114,8 +173,12 @@ def render(size):
         return value * factor * SS
 
     draw_rounded_rect(buf, sw, s(4), s(4), s(120), s(120), s(26), bytes(BG))
+    draw_ring(buf, sw, s(RING_CX), s(RING_CY), s(RING_OUTER), s(RING_INNER),
+              bytes(ACCENT))
     draw_triangle(buf, sw,
-                  (s(50), s(36)), (s(96), s(64)), (s(50), s(92)),
+                  (s(TRI_BASE_X), s(RING_CY - TRI_HALF_H)),
+                  (s(TRI_APEX_X), s(RING_CY)),
+                  (s(TRI_BASE_X), s(RING_CY + TRI_HALF_H)),
                   bytes(ACCENT))
     return downsample(buf, sw, size, SS)
 

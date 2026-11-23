@@ -2,3 +2,6 @@ mediaplayer
 *.o
 build/
 .DS_Store
+
+# Kilo local config/plans
+.kilo/

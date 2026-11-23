@@ -20,6 +20,13 @@
 
 #define UI_DENSITY 0.8f
 #define UI_FONT_BASE 19.0f
+#define APP_DISPLAY_NAME "C-Side Media Player"
+
+/* SDL_HINT_APP_NAME is newer than some SDL2 builds; the literal value is
+ * stable, so fall back to it rather than failing to compile. */
+#ifndef SDL_HINT_APP_NAME
+#define SDL_HINT_APP_NAME "SDL_APP_NAME"
+#endif
 
 /* Renderer output in physical pixels and the backing scale ratio (points to
  * pixels). Nuklear lays out in renderer pixels, SDL delivers input in points. */
@@ -188,6 +195,10 @@ ui_seek_bar(struct nk_context *ctx, float s, float frac,
 int
 main(int argc, char **argv)
 {
+    /* Name the app for volume mixers and screensaver inhibitors. Set before
+     * the first SDL_Init so the audio backend picks it up on device open. */
+    SDL_SetHint(SDL_HINT_APP_NAME, APP_DISPLAY_NAME);
+
     if (SDL_Init(SDL_INIT_VIDEO) != 0) {
         SDL_Log("SDL_Init failed: %s", SDL_GetError());
         return 1;
@@ -197,7 +208,7 @@ main(int argc, char **argv)
     if (SDL_Init(SDL_INIT_AUDIO) != 0)
         SDL_Log("SDL audio init failed: %s", SDL_GetError());
 
-    SDL_Window *win = SDL_CreateWindow("mediaplayer",
+    SDL_Window *win = SDL_CreateWindow(APP_DISPLAY_NAME,
         SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, 900, 520,
         SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI);
     if (!win) {
@@ -448,9 +459,9 @@ main(int argc, char **argv)
         /* The OS renders the title, so the em dash is safe here (the default
          * Nuklear font has no glyph for it). Only update on change. */
         if (base[0])
-            snprintf(title, sizeof title, "%s — mediaplayer", base);
+            snprintf(title, sizeof title, "%s — %s", base, APP_DISPLAY_NAME);
         else
-            snprintf(title, sizeof title, "mediaplayer");
+            snprintf(title, sizeof title, "%s", APP_DISPLAY_NAME);
         if (strcmp(title, window_title) != 0) {
             SDL_SetWindowTitle(win, title);
             snprintf(window_title, sizeof window_title, "%s", title);

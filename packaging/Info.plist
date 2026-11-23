@@ -4,9 +4,9 @@
 <plist version="1.0">
 <dict>
   <key>CFBundleName</key>
-  <string>mediaplayer</string>
+  <string>C-Side</string>
   <key>CFBundleDisplayName</key>
-  <string>mediaplayer</string>
+  <string>C-Side Media Player</string>
   <key>CFBundleExecutable</key>
   <string>mediaplayer</string>
   <key>CFBundleIdentifier</key>
