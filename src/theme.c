@@ -1332,3 +1332,361 @@ mp_volume_slider(struct nk_context *ctx, float scale, const struct MpTheme *th,
 
     return changed;
 }
+
+/* ---- Phase 5: content hierarchy and states ------------------------------ */
+
+#define MP_CHIP_PAD_X       8.0f  /* logical pt inside a chip, each side */
+#define MP_CHIP_H_EXTRA     8.0f  /* chip height above the font height */
+#define MP_CHIP_GAP         6.0f
+#define MP_CHIP_ROUND       9.0f
+#define MP_DOT_D            8.0f
+#define MP_DOT_SLOT         16.0f /* width reserved for the dot beside the name */
+#define MP_STATUS_NAME_MIN  120.0f /* chips drop before the name gets this short */
+#define MP_ERR_PAD_X        12.0f
+#define MP_ERR_ROUND        9.0f
+#define MP_EMPTY_DISC_MAX   64.0f
+#define MP_EMPTY_DISC_MIN   24.0f
+#define MP_EMPTY_GAP        10.0f
+#define MP_GLOW_RING        3.0f  /* logical pt the playing dot's halo extends */
+
+/* Text height and colour helpers for the new rows. */
+static void
+mp_draw_line(struct nk_command_buffer *canvas, const struct nk_user_font *font,
+    struct nk_rect r, const char *s, struct nk_color fg)
+{
+    nk_draw_text(canvas, r, s, (int)strlen(s), font,
+                 mp_col_alpha(MP_INK, 0), fg);
+}
+
+/* Shrinks `in` to fit max_w, ending in "..." (the default font has no
+ * ellipsis glyph). Cuts on UTF-8 boundaries so a multibyte sequence is never
+ * split. Binary search: ~log(n) width calls, not one per dropped byte. */
+static void
+mp_elide(const struct nk_user_font *font, const char *in, float max_w,
+    char *out, size_t outlen)
+{
+    size_t lo = 0, hi, len;
+
+    if (outlen == 0)
+        return;
+    len = strlen(in);
+    if (mp_text_w(font, in) <= max_w) {
+        snprintf(out, outlen, "%s", in);
+        return;
+    }
+    hi = len;
+    /* Invariant: prefix of length lo fits (lo=0 is "..."), hi does not. The
+     * probe may end mid-character; only the final cut is snapped, which can
+     * only shorten it, so it still fits. */
+    while (lo < hi) {
+        size_t mid = (lo + hi + 1) / 2;
+        char probe[600];
+
+        snprintf(probe, sizeof probe, "%.*s...", (int)mid, in);
+        if (mp_text_w(font, probe) <= max_w)
+            lo = mid;
+        else
+            hi = mid - 1;
+    }
+    /* Back off to a UTF-8 lead byte so the cut is a whole character. */
+    while (lo > 0 && ((unsigned char)in[lo] & 0xC0) == 0x80)
+        lo--;
+    snprintf(out, outlen, "%.*s...", (int)lo, in);
+}
+
+/* A rounded chip: surface pill with a 1 px border. The text is centred in it;
+ * the caller has already sized `r` from the text width. */
+static void
+mp_chip_draw(struct nk_command_buffer *canvas, const struct nk_user_font *font,
+    const struct MpTheme *th, struct nk_rect r, const char *s,
+    struct nk_color fg, float scale)
+{
+    float tw = mp_text_w(font, s);
+
+    nk_fill_rect(canvas, r, r.h * 0.5f, th->surface);
+    nk_stroke_rect(canvas, r, r.h * 0.5f, mp_s(1.0f, scale), th->border);
+    mp_draw_line(canvas, font,
+                 nk_rect(r.x + (r.w - tw) * 0.5f,
+                         r.y + (r.h - font->height) * 0.5f, tw, font->height),
+                 s, fg);
+}
+
+static float
+mp_chip_w(const struct nk_user_font *font, const char *s, float scale)
+{
+    return mp_text_w(font, s) + 2.0f * mp_s(MP_CHIP_PAD_X, scale);
+}
+
+/* Chip row from the right edge of `r`, first chip rightmost. Returns the
+ * left edge reached so the caller knows what space is left. */
+static float
+mp_chips_right(struct nk_command_buffer *canvas, const struct nk_user_font *font,
+    const struct MpTheme *th, struct nk_rect r, const char *const *chips,
+    int nchips, float scale)
+{
+    float right = r.x + r.w;
+    float h = font->height + mp_s(MP_CHIP_H_EXTRA, scale);
+    float y = r.y + (r.h - h) * 0.5f;
+    int i;
+
+    for (i = nchips - 1; i >= 0; i--) {
+        float w = mp_chip_w(font, chips[i], scale);
+        mp_chip_draw(canvas, font, th, nk_rect(right - w, y, w, h), chips[i],
+                     th->text_secondary, scale);
+        right -= w + mp_s(MP_CHIP_GAP, scale);
+    }
+    return right;
+}
+
+/* Filename, dot, and chips in one header cell. The dot slot is reserved
+ * whenever a track is loaded, so the name does not shift on play/pause.
+ * Chips drop from the end of the list (the last ones first) when the name
+ * would get shorter than MP_STATUS_NAME_MIN. */
+void
+mp_status_row(struct nk_context *ctx, float scale, const struct MpTheme *th,
+    const char *name, const char *const *chips, int nchips,
+    enum mp_play_state ps)
+{
+    struct nk_rect row;
+    struct nk_command_buffer *canvas;
+    const struct nk_user_font *font = ctx->style.font;
+    enum nk_widget_layout_states state;
+    float dot_slot, name_x, name_w, chips_w = 0.0f, min_w;
+    int shown = nchips;
+    char elided[600];
+
+    state = nk_widget(&row, ctx);
+    if (state == NK_WIDGET_INVALID)
+        return;
+    canvas = nk_window_get_canvas(ctx);
+
+    if (!name) {
+        mp_draw_line(canvas, font,
+                     nk_rect(row.x, row.y + (row.h - font->height) * 0.5f,
+                             row.w, font->height),
+                     "no file loaded", th->text_secondary);
+        return;
+    }
+
+    dot_slot = mp_s(MP_DOT_SLOT, scale);
+    min_w = mp_s(MP_STATUS_NAME_MIN, scale);
+    for (;;) {
+        float right_w = 0.0f;
+        int k;
+
+        for (k = 0; k < shown; k++)
+            right_w += mp_chip_w(font, chips[k], scale) +
+                mp_s(MP_CHIP_GAP, scale);
+        if (row.w - dot_slot - right_w >= min_w || shown == 0) {
+            chips_w = right_w;
+            break;
+        }
+        shown--;
+    }
+
+    name_x = row.x + dot_slot;
+    name_w = row.w - dot_slot - chips_w;
+    if (name_w < 1.0f)
+        name_w = 1.0f;
+
+    /* The dot: a solid accent with a halo while playing, a hollow ring while
+     * paused, nothing when stopped. The accent is a state signal here, not
+     * decoration. */
+    if (ps != MP_PS_STOPPED) {
+        float cy = row.y + row.h * 0.5f;
+        float d = mp_s(MP_DOT_D, scale);
+        float cx = row.x + dot_slot * 0.5f;
+        struct nk_rect dr = nk_rect(cx - d * 0.5f, cy - d * 0.5f, d, d);
+
+        if (ps == MP_PS_PLAYING) {
+            float g = mp_s(MP_GLOW_RING, scale);
+            nk_fill_circle(canvas,
+                nk_rect(dr.x - g, dr.y - g, d + 2.0f * g, d + 2.0f * g),
+                mp_col_alpha(th->accent_a, 56));
+            nk_fill_circle(canvas, dr, th->accent_a);
+        } else {
+            nk_stroke_circle(canvas, dr, mp_s(1.5f, scale),
+                             mp_col_alpha(th->accent_a, 180));
+        }
+    }
+
+    mp_elide(font, name, name_w, elided, sizeof elided);
+    mp_draw_line(canvas, font,
+                 nk_rect(name_x, row.y + (row.h - font->height) * 0.5f,
+                         name_w, font->height),
+                 elided, th->text_primary);
+
+    if (shown > 0)
+        mp_chips_right(canvas, font, th, row, chips, shown, scale);
+}
+
+/* Error message in a danger panel. Long messages are elided; the full text
+ * comes up as a tooltip while the pointer is over the panel. */
+void
+mp_error_panel(struct nk_context *ctx, float scale, const struct MpTheme *th,
+    const char *text)
+{
+    struct nk_rect row, panel;
+    struct nk_command_buffer *canvas;
+    const struct nk_user_font *font = ctx->style.font;
+    enum nk_widget_layout_states state;
+    float pad, avail, border;
+    char elided[600];
+
+    state = nk_widget(&row, ctx);
+    if (state == NK_WIDGET_INVALID)
+        return;
+    canvas = nk_window_get_canvas(ctx);
+
+    /* A 2 px inset keeps the rounded panel inside the row (no per-rect clip
+     * in Nuklear, so overlays stay inside by construction). */
+    panel = nk_rect(row.x, row.y + mp_s(2.0f, scale), row.w,
+                    row.h - mp_s(4.0f, scale));
+    border = mp_s(1.0f, scale);
+    nk_fill_rect(canvas, panel, mp_s(MP_ERR_ROUND, scale), th->danger_surface);
+    nk_stroke_rect(canvas, panel, mp_s(MP_ERR_ROUND, scale), border,
+                   th->danger);
+
+    pad = mp_s(MP_ERR_PAD_X, scale);
+    avail = panel.w - 2.0f * pad;
+    if (avail < 1.0f)
+        avail = 1.0f;
+    mp_elide(font, text, avail, elided, sizeof elided);
+    mp_draw_line(canvas, font,
+                 nk_rect(panel.x + pad,
+                         panel.y + (panel.h - font->height) * 0.5f,
+                         avail, font->height),
+                 elided, th->danger);
+
+    if (strcmp(elided, text) != 0 &&
+        nk_input_is_mouse_hovering_rect(&ctx->input, panel))
+        nk_tooltip(ctx, text);
+}
+
+/* "cur / total": the current time in text_primary, the total in
+ * text_secondary. The font is monospaced, so the centring maths is stable. */
+void
+mp_time_label(struct nk_context *ctx, const struct MpTheme *th,
+    const char *cur, const char *total)
+{
+    struct nk_rect row;
+    struct nk_command_buffer *canvas;
+    const struct nk_user_font *font = ctx->style.font;
+    enum nk_widget_layout_states state;
+    float wc, wsep, wt, x;
+    float y;
+
+    state = nk_widget(&row, ctx);
+    if (state == NK_WIDGET_INVALID)
+        return;
+    canvas = nk_window_get_canvas(ctx);
+
+    wc = mp_text_w(font, cur);
+    wsep = mp_text_w(font, " / ");
+    wt = mp_text_w(font, total);
+    x = row.x + (row.w - (wc + wsep + wt)) * 0.5f;
+    y = row.y + (row.h - font->height) * 0.5f;
+
+    mp_draw_line(canvas, font, nk_rect(x, y, wc, font->height), cur,
+                 th->text_primary);
+    mp_draw_line(canvas, font, nk_rect(x + wc, y, wsep + wt, font->height),
+                 " / ", th->text_secondary);
+    mp_draw_line(canvas, font, nk_rect(x + wc + wsep, y, wt, font->height),
+                 total, th->text_secondary);
+}
+
+/* Hint text in text_muted. Lives here so main.c names no colour. */
+void
+mp_label_muted(struct nk_context *ctx, const struct MpTheme *th,
+    const char *text, nk_flags align)
+{
+    nk_label_colored(ctx, text, align, th->text_muted);
+}
+
+/* Empty playlist with nothing loaded: a drawn disc above a headline and a row
+ * of supported extensions. The caller sets the row layout (one row, the band
+ * height). The disc is dropped first when the band is too short for it. */
+void
+mp_empty_state(struct nk_context *ctx, float scale, const struct MpTheme *th,
+    const char *headline, const char *const *chips, int nchips)
+{
+    struct nk_rect row;
+    struct nk_command_buffer *canvas;
+    const struct nk_user_font *font = ctx->style.font;
+    enum nk_widget_layout_states state;
+    float gap = mp_s(MP_EMPTY_GAP, scale);
+    float chip_h = font->height + mp_s(MP_CHIP_H_EXTRA, scale);
+    float text_h = font->height;
+    float fixed, disc = 0.0f, total, y, cx;
+    int shown = nchips, i;
+
+    state = nk_widget(&row, ctx);
+    if (state == NK_WIDGET_INVALID)
+        return;
+    canvas = nk_window_get_canvas(ctx);
+
+    fixed = text_h + gap + chip_h;
+    if (row.h - fixed - gap >= mp_s(MP_EMPTY_DISC_MIN, scale)) {
+        disc = row.h - fixed - gap;
+        if (disc > mp_s(MP_EMPTY_DISC_MAX, scale))
+            disc = mp_s(MP_EMPTY_DISC_MAX, scale);
+    }
+    total = fixed + (disc > 0.0f ? disc + gap : 0.0f);
+    y = row.y + (row.h - total) * 0.5f;
+    if (y < row.y)
+        y = row.y;
+    cx = row.x + row.w * 0.5f;
+
+    if (disc > 0.0f) {
+        struct nk_rect dr = nk_rect(cx - disc * 0.5f, y, disc, disc);
+        float hub = disc * 0.22f;
+        struct nk_rect hr = nk_rect(cx - hub * 0.5f, y + (disc - hub) * 0.5f,
+                                    hub, hub);
+
+        nk_fill_circle(canvas, dr, th->surface);
+        nk_stroke_circle(canvas, dr, mp_s(1.0f, scale), th->border);
+        /* A groove ring inside the disc, then the accent rim on top. */
+        nk_stroke_circle(canvas,
+            nk_rect(cx - disc * 0.36f, y + disc * 0.14f,
+                    disc * 0.72f, disc * 0.72f),
+            mp_s(1.0f, scale), mp_col_alpha(th->border_strong, 140));
+        nk_stroke_circle(canvas,
+            nk_rect(dr.x + mp_s(3.0f, scale), dr.y + mp_s(3.0f, scale),
+                    disc - mp_s(6.0f, scale), disc - mp_s(6.0f, scale)),
+            mp_s(1.5f, scale), mp_col_alpha(th->accent_a, 150));
+        nk_fill_circle(canvas, hr, th->surface_active);
+        y += disc + gap;
+    }
+
+    {
+        float tw = mp_text_w(font, headline);
+        mp_draw_line(canvas, font,
+                     nk_rect(cx - tw * 0.5f, y, tw, text_h), headline,
+                     th->text_primary);
+    }
+    y += text_h + gap;
+
+    /* Extension chips: shed from the end until the row fits. */
+    for (;;) {
+        float w = 0.0f;
+        for (i = 0; i < shown; i++)
+            w += mp_chip_w(font, chips[i], scale) + mp_s(MP_CHIP_GAP, scale);
+        if (w - mp_s(MP_CHIP_GAP, scale) <= row.w || shown == 0)
+            break;
+        shown--;
+    }
+    {
+        float cw = 0.0f, x;
+        float gap_x = mp_s(MP_CHIP_GAP, scale);
+
+        for (i = 0; i < shown; i++)
+            cw += mp_chip_w(font, chips[i], scale) + (i ? gap_x : 0.0f);
+        x = cx - cw * 0.5f;
+        for (i = 0; i < shown; i++) {
+            float w = mp_chip_w(font, chips[i], scale);
+            mp_chip_draw(canvas, font, th, nk_rect(x, y, w, chip_h),
+                         chips[i], th->text_muted, scale);
+            x += w + gap_x;
+        }
+    }
+}

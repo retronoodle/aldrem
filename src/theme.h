@@ -158,4 +158,31 @@ nk_bool mp_dock_begin(struct nk_context *ctx, float scale, struct nk_rect col,
     float content_h, struct MpTheme *th);
 void mp_dock_end(struct nk_context *ctx);
 
+/* Content hierarchy and states. The caller maps the engine state to this
+ * enum, so theme code never depends on the playback module. */
+enum mp_play_state { MP_PS_STOPPED, MP_PS_PLAYING, MP_PS_PAUSED };
+
+/* Header cell: filename (elided) with a state dot, and metadata chips on the
+ * right. `name` NULL draws "no file loaded". Each lays out one row cell. */
+void mp_status_row(struct nk_context *ctx, float scale, const struct MpTheme *th,
+    const char *name, const char *const *chips, int nchips,
+    enum mp_play_state ps);
+
+/* Error text in a danger panel; the full text shows as a tooltip if elided. */
+void mp_error_panel(struct nk_context *ctx, float scale, const struct MpTheme *th,
+    const char *text);
+
+/* "cur / total" with the current time primary and the total secondary. */
+void mp_time_label(struct nk_context *ctx, const struct MpTheme *th,
+    const char *cur, const char *total);
+
+/* A label in text_muted, for hints. `align` is an NK_TEXT_* flag. */
+void mp_label_muted(struct nk_context *ctx, const struct MpTheme *th,
+    const char *text, nk_flags align);
+
+/* Empty-playlist illustration: a disc, a headline and a chip row. The caller
+ * sets a one-row layout at the band height first. */
+void mp_empty_state(struct nk_context *ctx, float scale, const struct MpTheme *th,
+    const char *headline, const char *const *chips, int nchips);
+
 #endif

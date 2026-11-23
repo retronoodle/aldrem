@@ -227,9 +227,28 @@ ui_column(struct nk_rect frame, float scale)
  *
  * Deliberately one function: issue #3 will move this panel under a tab without
  * touching the layout maths. */
+/* Extensions shown as chips in the empty playlist. */
+static const char *const ui_ext_chips[] = {
+    ".wav", ".mp3", ".flac", ".ogg", ".aiff", ".aif", ".aifc"
+};
+
+/* Height left under the playlist buttons, for the list or the empty state. */
+static float
+ui_list_height(struct nk_context *ctx, float scale, float row_h)
+{
+    struct nk_rect content = nk_window_get_content_region(ctx);
+    struct nk_rect last = nk_layout_widget_bounds(ctx);
+    float list_h = (content.y + content.h) - (last.y + last.h)
+        - mp_s(4.0f, scale);
+
+    if (list_h < 3.0f * row_h)
+        list_h = 3.0f * row_h;
+    return list_h;
+}
+
 static int
 ui_playlist_panel(Playlist *pl, struct nk_context *ctx, float scale,
-    int disabled)
+    int disabled, const struct MpTheme *th, int has_track)
 {
     char header[64];
     float row_h = mp_s(PL_ROW_H, scale);
@@ -275,18 +294,22 @@ ui_playlist_panel(Playlist *pl, struct nk_context *ctx, float scale,
         nk_widget_disable_end(ctx);
 
     if (count == 0) {
-        nk_layout_row_dynamic(ctx, row_h, 1);
-        nk_label(ctx, "empty - drop audio files here to add them",
-                 NK_TEXT_LEFT);
+        /* With nothing loaded the band is the drop target: draw the empty
+         * state. With a track playing, a single-line hint is enough. */
+        if (has_track) {
+            nk_layout_row_dynamic(ctx, row_h, 1);
+            mp_label_muted(ctx, th, "empty - drop audio files here to add them",
+                           NK_TEXT_LEFT);
+        } else {
+            nk_layout_row_dynamic(ctx, ui_list_height(ctx, scale, row_h), 1);
+            mp_empty_state(ctx, scale, th, "Drop a track to begin",
+                           ui_ext_chips,
+                           (int)(sizeof ui_ext_chips / sizeof ui_ext_chips[0]));
+        }
     } else {
         struct nk_list_view view;
-        struct nk_rect content = nk_window_get_content_region(ctx);
-        struct nk_rect last = nk_layout_widget_bounds(ctx);
-        float list_h = (content.y + content.h) - (last.y + last.h)
-            - mp_s(4.0f, scale);
+        float list_h = ui_list_height(ctx, scale, row_h);
 
-        if (list_h < 3.0f * row_h)
-            list_h = 3.0f * row_h;
         nk_layout_row_dynamic(ctx, list_h, 1);
 
         if (disabled)
@@ -379,7 +402,8 @@ struct UiButtons {
 static int
 ui_transport_panel(struct nk_context *ctx, float scale, const struct MpTheme *th,
     const PlaybackStatus *st, Playlist *pl, int modal_active,
-    const char *timebuf, float progress, const char *volbuf,
+    const char *curbuf, const char *totbuf, float progress,
+    const char *volbuf,
     int *seek_dragging, float *seek_preview, struct UiButtons *ub,
     double *seek_out)
 {
@@ -388,11 +412,11 @@ ui_transport_panel(struct nk_context *ctx, float scale, const struct MpTheme *th
     int slider_live;
 
     nk_layout_row_dynamic(ctx, mp_s(35.0f, scale), 1);
-    nk_label(ctx, timebuf, NK_TEXT_CENTERED);
+    mp_time_label(ctx, th, curbuf, totbuf);
 
     nk_layout_row_dynamic(ctx, mp_s(35.0f, scale), 1);
     if (!st->has_track) {
-        nk_label(ctx, "drop a .wav, .mp3, .flac, .ogg, .aiff, .aif or .aifc here", NK_TEXT_CENTERED);
+        mp_label_muted(ctx, th, "no track loaded", NK_TEXT_CENTERED);
     } else if (mp_seek_bar(ctx, scale, th, progress, !modal_active,
                            seek_dragging, seek_preview, st->duration,
                            ub->opt.dt, &ub->seek)) {
@@ -768,11 +792,16 @@ main(int argc, char **argv)
         }
 
         PlaybackStatus st;
-        char timebuf[64];
+        char curbuf[16];
+        char totbuf[16];
         char volbuf[32];
         char title[640];
-        char statusbuf[768];
         char chbuf[16];
+        char bitsbuf[16];
+        char ratebuf[24];
+        const char *chips[4];
+        int nchips = 0;
+        enum mp_play_state play_ps;
         const char *base;
         float progress;
         double shown;
@@ -831,10 +860,11 @@ main(int argc, char **argv)
                 cur = 0;
             if (cur > dur)
                 cur = dur;
-            snprintf(timebuf, sizeof timebuf, "%d:%02d / %d:%02d",
-                     cur / 60, cur % 60, dur / 60, dur % 60);
+            snprintf(curbuf, sizeof curbuf, "%d:%02d", cur / 60, cur % 60);
+            snprintf(totbuf, sizeof totbuf, "%d:%02d", dur / 60, dur % 60);
         } else {
-            snprintf(timebuf, sizeof timebuf, "--:-- / --:--");
+            snprintf(curbuf, sizeof curbuf, "--:--");
+            snprintf(totbuf, sizeof totbuf, "--:--");
         }
 
         progress = st.duration > 0.0 ? (float)(st.position / st.duration) : 0.0f;
@@ -851,10 +881,17 @@ main(int argc, char **argv)
             base = slash ? slash + 1 : st.name;
         }
 
-        if (st.error[0]) {
-            snprintf(statusbuf, sizeof statusbuf, "%s", st.error);
-        } else if (st.has_track) {
-            const char *codec = st.codec[0] ? st.codec : "audio";
+        /* Header chips: the same decoded fields as before, one chip each. */
+        if (st.has_track) {
+            if (st.codec[0])
+                chips[nchips++] = st.codec;
+            if (st.bits_per_sample > 0) {
+                snprintf(bitsbuf, sizeof bitsbuf, "%d-bit",
+                         st.bits_per_sample);
+                chips[nchips++] = bitsbuf;
+            }
+            snprintf(ratebuf, sizeof ratebuf, "%d Hz", st.sample_rate);
+            chips[nchips++] = ratebuf;
 
             if (st.channels == 1)
                 snprintf(chbuf, sizeof chbuf, "mono");
@@ -862,17 +899,15 @@ main(int argc, char **argv)
                 snprintf(chbuf, sizeof chbuf, "stereo");
             else
                 snprintf(chbuf, sizeof chbuf, "%d ch", st.channels);
-
-            if (st.bits_per_sample > 0)
-                snprintf(statusbuf, sizeof statusbuf,
-                         "%s  |  %s %d-bit %d Hz %s",
-                         base, codec, st.bits_per_sample, st.sample_rate, chbuf);
-            else
-                snprintf(statusbuf, sizeof statusbuf, "%s  |  %s %d Hz %s",
-                         base, codec, st.sample_rate, chbuf);
-        } else {
-            snprintf(statusbuf, sizeof statusbuf, "no file loaded");
+            chips[nchips++] = chbuf;
         }
+
+        if (st.state == MP_PLAYING)
+            play_ps = MP_PS_PLAYING;
+        else if (st.state == MP_PAUSED)
+            play_ps = MP_PS_PAUSED;
+        else
+            play_ps = MP_PS_STOPPED;
 
         /* The OS renders the title, so the em dash is safe here (the default
          * Nuklear font has no glyph for it). Only update on change. */
@@ -911,7 +946,12 @@ main(int argc, char **argv)
                 browser_list_mode = 0;
                 file_browser_open(browser, st.has_track ? st.name : NULL);
             }
-            nk_label(ctx, statusbuf, NK_TEXT_LEFT);
+            if (st.error[0])
+                mp_error_panel(ctx, ui_scale, &theme, st.error);
+            else
+                mp_status_row(ctx, ui_scale, &theme,
+                              st.has_track ? base : NULL, chips, nchips,
+                              play_ps);
 
             /* The dock holds time, seek, transport and volume; its content
              * height is the four rows plus the three 4 pt gaps between them.
@@ -926,7 +966,7 @@ main(int argc, char **argv)
                 double seek = 0.0;
 
                 if (ui_transport_panel(ctx, ui_scale, &theme, &st, pl,
-                                       modal_active, timebuf, progress,
+                                       modal_active, curbuf, totbuf, progress,
                                        volbuf, &seek_dragging,
                                        &seek_preview, &buttons, &seek))
                     playback_seek(seek);
@@ -938,7 +978,8 @@ main(int argc, char **argv)
             if (dock_open)
                 mp_dock_end(ctx);
             nk_layout_row_dynamic(ctx, mp_s(4.0f, ui_scale), 1);
-            panel_actions = ui_playlist_panel(pl, ctx, ui_scale, modal_active);
+            panel_actions = ui_playlist_panel(pl, ctx, ui_scale, modal_active,
+                                              &theme, st.has_track);
         }
         nk_end(ctx);
         nk_style_pop_style_item(ctx);
