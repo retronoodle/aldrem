@@ -373,16 +373,17 @@ struct UiButtons {
     int focus;
 };
 
-/* Time, seek, transport and volume, gathered inside the dock panel. Returns
- * the pending seek (seconds) when the seek bar was released, else 0; every
- * other action is applied here through the same calls as before. */
-static double
+/* Time, seek, transport and volume, gathered inside the dock panel. Returns 1
+ * when the seek bar was released, with the target (seconds) in `*seek_out`;
+ * every other action is applied here through the same calls as before. */
+static int
 ui_transport_panel(struct nk_context *ctx, float scale, const struct MpTheme *th,
     const PlaybackStatus *st, Playlist *pl, int modal_active,
     const char *timebuf, float progress, const char *volbuf,
-    int *seek_dragging, float *seek_preview, struct UiButtons *ub)
+    int *seek_dragging, float *seek_preview, struct UiButtons *ub,
+    double *seek_out)
 {
-    double seek = 0.0;
+    int released = 0;
     float volume = (float)st->volume_percent / 100.0f;
     int slider_live;
 
@@ -395,7 +396,8 @@ ui_transport_panel(struct nk_context *ctx, float scale, const struct MpTheme *th
     } else if (mp_seek_bar(ctx, scale, th, progress, !modal_active,
                            seek_dragging, seek_preview, st->duration,
                            ub->opt.dt, &ub->seek)) {
-        seek = (double)*seek_preview * st->duration;
+        *seek_out = (double)*seek_preview * st->duration;
+        released = 1;
     }
 
     /* Prev | [hero Play/Pause] | Stop | Next. Prev/Next work from list entries
@@ -436,7 +438,7 @@ ui_transport_panel(struct nk_context *ctx, float scale, const struct MpTheme *th
                          &ub->vol))
         playback_set_volume((int)lroundf(volume * 100.0f));
 
-    return seek;
+    return released;
 }
 
 /* Small centred Save-as dialog. Returns 1 while it should stay open. Enter (in
@@ -921,13 +923,12 @@ main(int argc, char **argv)
                 mp_s(140.0f, ui_scale) + 3.0f * mp_s(4.0f, ui_scale),
                 &theme);
             if (dock_open) {
-                double seek = ui_transport_panel(ctx, ui_scale, &theme, &st,
-                                                 pl, modal_active, timebuf,
-                                                 progress, volbuf,
-                                                 &seek_dragging,
-                                                 &seek_preview, &buttons);
+                double seek = 0.0;
 
-                if (seek != 0.0)
+                if (ui_transport_panel(ctx, ui_scale, &theme, &st, pl,
+                                       modal_active, timebuf, progress,
+                                       volbuf, &seek_dragging,
+                                       &seek_preview, &buttons, &seek))
                     playback_seek(seek);
             }
 

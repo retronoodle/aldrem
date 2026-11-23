@@ -983,20 +983,25 @@ mp_fill_draw(struct nk_context *ctx, struct nk_rect track, float frac,
     if (w <= 0.0f || r <= 0.0f || track.w <= 0.0f)
         return;
 
-    /* The ramp sampled at the two cap centres; c1 may land on the left of a
-     * sliver fill, where mp_col_lerp clamps t to 0. */
+    /* Narrower than the two caps need: one disc the fill's own width, so the
+     * colour never reaches past the value. */
+    if (w < 2.0f * r) {
+        nk_fill_circle(canvas, nk_rect(track.x, cy - w * 0.5f, w, w),
+                       mp_col_lerp(a, b, w * 0.5f / track.w));
+        return;
+    }
+
+    /* The ramp sampled at the two cap centres. */
     c0 = mp_col_lerp(a, b, r / track.w);
     c1 = mp_col_lerp(a, b, (w - r) / track.w);
 
     /* Band between the cap centres, then the caps over its square ends. */
-    if (w >= 2.0f * r)
-        nk_fill_rect_multi_color(canvas,
-            nk_rect(track.x + r, cy - r, w - 2.0f * r, 2.0f * r),
-            c0, c0, c1, c1);
+    nk_fill_rect_multi_color(canvas,
+        nk_rect(track.x + r, cy - r, w - 2.0f * r, 2.0f * r),
+        c0, c0, c1, c1);
     nk_fill_circle(canvas, nk_rect(track.x, cy - r, 2.0f * r, 2.0f * r), a);
-    if (w >= r)
-        nk_fill_circle(canvas, nk_rect(track.x + w - 2.0f * r, cy - r,
-                                       2.0f * r, 2.0f * r), c1);
+    nk_fill_circle(canvas, nk_rect(track.x + w - 2.0f * r, cy - r,
+                                   2.0f * r, 2.0f * r), c1);
 
     /* The wet band: a hairline along the top of the fill, paler at the fill's
      * end. Only the seek track is tall enough to carry it. */
