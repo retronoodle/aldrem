@@ -12,6 +12,10 @@ typedef struct {
     double position;       /* seconds */
     double duration;       /* seconds */
     int    volume_percent; /* 0..100 */
+    /* Linear output levels, post-volume, 0..1 (may briefly exceed 1 on clipping).
+     * Zero unless PLAYING. Peak is the block maximum; RMS is the block mean. */
+    float  level_peak_l, level_peak_r;
+    float  level_rms_l,  level_rms_r;
     char   name[512];      /* loaded path, empty when nothing is loaded */
     char   error[512];     /* last load/start error, empty on success */
     char   codec[8];       /* decoded format label ("WAV"/"MP3"/"Vorbis"/"AIFF"/"AIFC") */

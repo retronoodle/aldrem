@@ -30,6 +30,7 @@
 #define MP_ACCENT_INK       nk_rgb(  7,  16,  26) /* #07101A */
 #define MP_TRACK            nk_rgb( 36,  44,  64) /* #242C40 */
 #define MP_SUCCESS          nk_rgb( 52, 211, 153) /* #34D399 */
+#define MP_AMBER            nk_rgb(251, 191,  36) /* #FBBF24 */
 #define MP_DANGER           nk_rgb(251, 113, 133) /* #FB7185 */
 #define MP_DANGER_SURFACE   nk_rgb( 42,  22,  32) /* #2A1620 */
 #define MP_SHADOW           nk_rgba(  3,   5,  10, 102) /* #03060A @ 40% */
@@ -190,6 +191,7 @@ mp_theme_init(struct MpTheme *th, SDL_Renderer *ren)
     th->track = MP_TRACK;
     th->success = MP_SUCCESS;
     th->danger = MP_DANGER;
+    th->amber = MP_AMBER;
     th->danger_surface = MP_DANGER_SURFACE;
     th->shadow = MP_SHADOW;
     th->ambient_glow = ren ? make_ambient_glow(ren, th->ambient_cyan,
@@ -1823,5 +1825,123 @@ mp_empty_state(struct nk_context *ctx, float scale, const struct MpTheme *th,
                          chips[i], th->text_muted, scale);
             x += w + gap_x;
         }
+    }
+}
+
+/* ---- Level meter ------------------------------------------------------- */
+
+#define MP_VU_HALF_PI    1.5707963f
+#define MP_VU_SWEEP      0.95f /* needle half-sweep from vertical, radians */
+#define MP_VU_RED_FRAC   0.85f /* dial scale turns red above this position */
+#define MP_VU_LED_SEGS   20     /* segments per LED bar */
+#define MP_VU_LED_GAP    2.0f   /* logical px between segments */
+#define MP_VU_PAD        4.0f   /* logical px inside a dial face */
+#define MP_VU_CHANNEL_GAP 8.0f  /* logical px between dials / LED bars */
+
+/* Needle angle for a 0..1 position: 0 swings left of vertical, 1 right. */
+static float
+mp_vu_angle(float frac)
+{
+    return -MP_VU_HALF_PI - MP_VU_SWEEP + 2.0f * MP_VU_SWEEP * frac;
+}
+
+static void
+mp_vu_dial(struct nk_command_buffer *canvas, struct nk_rect d, float level,
+    const struct MpTheme *th, float scale)
+{
+    float pad = mp_s(MP_VU_PAD, scale);
+    float r_h = d.h - 2.0f * pad;
+    float r_w = (d.w * 0.5f - pad) / sinf(MP_VU_SWEEP);
+    float r = r_h < r_w ? r_h : r_w;
+    float cx = d.x + d.w * 0.5f;
+    float cy = d.y + d.h - pad;
+    float thick = mp_s(1.5f, scale);
+    float ang;
+
+    if (r <= 0.0f)
+        return;
+    nk_fill_rect(canvas, d, mp_s(6.0f, scale), th->surface);
+    nk_stroke_rect(canvas, d, mp_s(6.0f, scale), mp_s(1.0f, scale), th->border);
+
+    /* Scale arc, with the top stretch in danger colour as a warning zone. */
+    nk_stroke_arc(canvas, cx, cy, r, mp_vu_angle(0.0f), mp_vu_angle(1.0f),
+                  thick, th->border_strong);
+    nk_stroke_arc(canvas, cx, cy, r, mp_vu_angle(MP_VU_RED_FRAC),
+                  mp_vu_angle(1.0f), thick * 1.6f, th->danger);
+
+    ang = mp_vu_angle(level < 0.0f ? 0.0f : (level > 1.0f ? 1.0f : level));
+    nk_stroke_line(canvas, cx, cy, cx + cosf(ang) * r * 0.92f,
+                   cy + sinf(ang) * r * 0.92f, thick, th->text_primary);
+    nk_fill_circle(canvas, nk_rect(cx - mp_s(2.5f, scale), cy - mp_s(2.5f, scale),
+                                   mp_s(5.0f, scale), mp_s(5.0f, scale)),
+                   th->text_primary);
+}
+
+static void
+mp_vu_bar(struct nk_command_buffer *canvas, struct nk_rect d, float level,
+    float peak, const struct MpTheme *th, float scale)
+{
+    float gap = mp_s(MP_VU_LED_GAP, scale);
+    float seg_w = (d.w - gap * (MP_VU_LED_SEGS - 1)) / MP_VU_LED_SEGS;
+    float lit = (level < 0.0f ? 0.0f : (level > 1.0f ? 1.0f : level))
+                * MP_VU_LED_SEGS;
+    int peak_i = (int)((peak < 0.0f ? 0.0f : (peak > 1.0f ? 1.0f : peak))
+                       * MP_VU_LED_SEGS);
+    int i;
+
+    if (seg_w < 1.0f || d.h <= 0.0f)
+        return;
+    if (peak_i >= MP_VU_LED_SEGS)
+        peak_i = MP_VU_LED_SEGS - 1;
+
+    for (i = 0; i < MP_VU_LED_SEGS; i++) {
+        /* Colour by where the segment sits on the scale, not by the level. */
+        float at = (i + 0.5f) / MP_VU_LED_SEGS;
+        struct nk_color c = at < 0.7f ? th->success
+                          : at < MP_VU_RED_FRAC ? th->amber : th->danger;
+        struct nk_rect s = nk_rect(d.x + i * (seg_w + gap), d.y, seg_w, d.h);
+
+        if ((float)(i + 1) <= lit)
+            nk_fill_rect(canvas, s, mp_s(1.0f, scale), c);
+        else if (i == peak_i)
+            nk_fill_rect(canvas, s, mp_s(1.0f, scale), th->text_primary);
+        else
+            nk_fill_rect(canvas, s, mp_s(1.0f, scale), mp_col_alpha(c, 40));
+    }
+}
+
+void
+mp_vu_meter(struct nk_context *ctx, float scale, const struct MpTheme *th,
+    int needle, const struct MpVuLevels *lv, float dt, struct MpVuAnim *anim)
+{
+    struct nk_rect row, left, right;
+    struct nk_command_buffer *canvas;
+    enum nk_widget_layout_states state;
+    float gap = mp_s(MP_VU_CHANNEL_GAP, scale);
+
+    state = nk_widget(&row, ctx);
+    if (state == NK_WIDGET_INVALID)
+        return;
+
+    /* Ballistics advance even while the meter is disabled, so a modal does
+     * not freeze the needle mid-swing. */
+    vu_ballistics_update(&anim->l, lv->rms_l, lv->peak_l, dt, th->reduce_motion);
+    vu_ballistics_update(&anim->r, lv->rms_r, lv->peak_r, dt, th->reduce_motion);
+
+    canvas = nk_window_get_canvas(ctx);
+    if (needle) {
+        float half = (row.w - gap) * 0.5f;
+
+        left = nk_rect(row.x, row.y, half, row.h);
+        right = nk_rect(row.x + half + gap, row.y, half, row.h);
+        mp_vu_dial(canvas, left, anim->l.needle, th, scale);
+        mp_vu_dial(canvas, right, anim->r.needle, th, scale);
+    } else {
+        float bar_h = (row.h - gap) * 0.5f;
+
+        left = nk_rect(row.x, row.y, row.w, bar_h);
+        right = nk_rect(row.x, row.y + bar_h + gap, row.w, bar_h);
+        mp_vu_bar(canvas, left, anim->l.needle, anim->l.peak, th, scale);
+        mp_vu_bar(canvas, right, anim->r.needle, anim->r.peak, th, scale);
     }
 }
