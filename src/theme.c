@@ -312,7 +312,7 @@ mp_theme_apply(struct nk_context *ctx, float scale, struct MpTheme *th)
     st->slider.cursor_active = nk_style_item_color(th->accent_b);
 
     /* Scrollbars: the list views. */
-    st->scrollh.normal = nk_style_item_color(th->surface);
+    st->scrollh.normal = nk_style_item_color(th->dock);
     st->scrollh.hover = nk_style_item_color(th->surface_hover);
     st->scrollh.active = nk_style_item_color(th->surface_active);
     st->scrollh.border_color = th->border;
@@ -1352,6 +1352,9 @@ mp_volume_slider(struct nk_context *ctx, float scale, const struct MpTheme *th,
 #define MP_STATUS_NAME_MIN  120.0f /* chips drop before the name gets this short */
 #define MP_ERR_PAD_X        12.0f
 #define MP_ERR_ROUND        9.0f
+#define MP_ROW_ROUND        4.0f  /* browser row fill corner */
+#define MP_ROW_BAR          3.0f  /* selected row's accent bar width */
+#define MP_ROW_PAD_X        10.0f
 #define MP_EMPTY_DISC_MAX   64.0f
 #define MP_EMPTY_DISC_MIN   24.0f
 #define MP_EMPTY_GAP        10.0f
@@ -1609,6 +1612,63 @@ mp_label_muted(struct nk_context *ctx, const struct MpTheme *th,
     const char *text, nk_flags align)
 {
     nk_label_colored(ctx, text, align, th->text_muted);
+}
+
+/* One file-browser row. Same contract as nk_select_label: returns 1 on a
+ * click, and the caller owns the selection. Selected rows get a tinted fill and
+ * an accent bar; directories are drawn in the accent. Long names elide with the
+ * full name as a tooltip. */
+int
+mp_list_row(struct nk_context *ctx, float scale, const struct MpTheme *th,
+    const char *text, int is_dir, int selected)
+{
+    struct nk_rect row, r;
+    struct nk_command_buffer *canvas;
+    const struct nk_user_font *font = ctx->style.font;
+    enum nk_widget_layout_states state;
+    struct nk_color fg;
+    float inset, pad, avail, round;
+    int hovered, clicked;
+    char elided[600];
+
+    state = nk_widget(&row, ctx);
+    if (state == NK_WIDGET_INVALID)
+        return 0;
+    canvas = nk_window_get_canvas(ctx);
+
+    /* Inset so the rounded fills stay inside the row cell. */
+    inset = mp_s(1.0f, scale);
+    r = nk_rect(row.x + inset, row.y + inset,
+                row.w - 2.0f * inset, row.h - 2.0f * inset);
+    round = mp_s(MP_ROW_ROUND, scale);
+
+    hovered = nk_input_is_mouse_hovering_rect(&ctx->input, row) ? 1 : 0;
+    clicked = nk_input_is_mouse_click_in_rect(&ctx->input, NK_BUTTON_LEFT, row);
+
+    if (selected) {
+        nk_fill_rect(canvas, r, round, mp_col_alpha(th->accent_a, 48));
+        nk_fill_rect(canvas,
+                     nk_rect(r.x, r.y + mp_s(4.0f, scale),
+                             mp_s(MP_ROW_BAR, scale), r.h - mp_s(8.0f, scale)),
+                     0.0f, th->accent_a);
+    } else if (hovered) {
+        nk_fill_rect(canvas, r, round, th->surface_hover);
+    }
+
+    fg = is_dir ? th->accent_a : th->text_primary;
+    pad = mp_s(MP_ROW_PAD_X, scale);
+    avail = r.w - 2.0f * pad;
+    if (avail < 1.0f)
+        avail = 1.0f;
+    mp_elide(font, text, avail, elided, sizeof elided);
+    mp_draw_line(canvas, font,
+                 nk_rect(r.x + pad, r.y + (r.h - font->height) * 0.5f,
+                         avail, font->height),
+                 elided, fg);
+
+    if (strcmp(elided, text) != 0 && hovered)
+        nk_tooltip(ctx, text);
+    return clicked;
 }
 
 /* Empty playlist with nothing loaded: a drawn disc above a headline and a row

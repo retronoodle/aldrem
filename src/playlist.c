@@ -560,11 +560,6 @@ playlist_add(Playlist *pl, const char *path)
         SDL_Log("playlist: unsupported file: %s", path);
         return 0;
     }
-    if (pl->count >= PL_MAX_ENTRIES) {
-        SDL_Log("playlist: list is full (%d entries)", PL_MAX_ENTRIES);
-        return 0;
-    }
-
     /* Entries are stored absolute so the autosave restores from any cwd. */
     if (!realpath(path, resolved)) {
         SDL_Log("playlist: cannot resolve %s: %s", path, strerror(errno));
@@ -572,7 +567,8 @@ playlist_add(Playlist *pl, const char *path)
     }
 
     /* Already listed: never add it twice. An idle player still starts it, so a
-     * CLI arg or drop of a known track keeps its autoplay. */
+     * CLI arg or drop of a known track keeps its autoplay. This runs before the
+     * capacity check so a full list can still start a known track. */
     for (index = 0; index < pl->count; index++) {
         const char *have = playlist_path_at(pl, index);
 
@@ -582,6 +578,11 @@ playlist_add(Playlist *pl, const char *path)
                 playlist_play_index(pl, index);
             return 1;
         }
+    }
+
+    if (pl->count >= PL_MAX_ENTRIES) {
+        SDL_Log("playlist: list is full (%d entries)", PL_MAX_ENTRIES);
+        return 0;
     }
 
     playback_get_status(&st);
