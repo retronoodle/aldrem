@@ -334,8 +334,8 @@ static struct MpAnim fb_cancel_anim;
 
 int
 file_browser_draw(FileBrowser *fb, struct nk_context *ctx, float scale,
-    struct MpTheme *theme, float screen_w, float screen_h, char *out,
-    size_t outlen)
+    struct MpTheme *theme, float dt, float screen_w, float screen_h,
+    char *out, size_t outlen)
 {
     struct nk_rect bounds;
     float row_h, footer_h, spacing, margin, list_h;
@@ -430,12 +430,11 @@ file_browser_draw(FileBrowser *fb, struct nk_context *ctx, float scale,
         if (theme) {
             /* Themed footer: Open is primary, Cancel neutral. The theme is
              * NULL until Phase 6 wires it, so stock buttons stay the default.
-             * Easing holds still because the browser re-draws on every frame
-             * of its own window; a zero dt is the honest value here. */
+             * dt is the caller's frame time: the easing needs it to move. */
             struct MpButtonOpts opt;
 
             opt.focus_slot = 0;
-            opt.dt = 0.0f;
+            opt.dt = dt;
             if (mp_button(ctx, scale, theme, "Open", MP_BTN_PRIMARY,
                           MP_ICON_PLAY, 0, fb->selected >= 0 && !loading,
                           &fb_open_anim, &opt))

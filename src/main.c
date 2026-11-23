@@ -421,11 +421,11 @@ ui_playlist_panel(Playlist *pl, struct nk_context *ctx, float scale,
  * button added later cannot silently renumber the others. */
 enum {
     UI_TAB_NONE = 0,
-    UI_TAB_PREV = 1,
+    UI_TAB_OPEN = 1,
+    UI_TAB_PREV,
     UI_TAB_PLAY,
     UI_TAB_STOP,
     UI_TAB_NEXT,
-    UI_TAB_OPEN,
     UI_TAB_LAST
 };
 
@@ -768,7 +768,15 @@ main(int argc, char **argv)
                 consumed = 1;
                 buttons.focus++;
                 if (buttons.focus >= UI_TAB_LAST)
-                    buttons.focus = UI_TAB_PREV;
+                    buttons.focus = UI_TAB_OPEN;
+            } else if (!modal_active && evt.type == SDL_KEYDOWN &&
+                       evt.key.repeat &&
+                       (evt.key.keysym.scancode == SDL_SCANCODE_RETURN ||
+                        evt.key.keysym.scancode == SDL_SCANCODE_KP_ENTER)) {
+                /* Each Enter repeat adds a key edge in Nuklear, so a held Enter
+                 * would re-fire the focused transport button. Dropped here; the
+                 * modal gate keeps repeats flowing into a dialog's text entry. */
+                consumed = 1;
             } else if (!modal_active && evt.type == SDL_KEYDOWN &&
                        evt.key.keysym.scancode == SDL_SCANCODE_LEFT) {
                 pending_seek -= 5.0;
@@ -1018,8 +1026,9 @@ main(int argc, char **argv)
         if (browser_open && browser) {
             char chosen[4096];
 
-            if (file_browser_draw(browser, ctx, ui_scale, NULL, (float)px_w,
-                                  (float)px_h, chosen, sizeof chosen) == 1) {
+            if (file_browser_draw(browser, ctx, ui_scale, NULL,
+                                  buttons.opt.dt, (float)px_w, (float)px_h,
+                                  chosen, sizeof chosen) == 1) {
                 if (browser_list_mode) {
                     char err[256];
 

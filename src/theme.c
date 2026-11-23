@@ -587,7 +587,20 @@ mp_btn_face(struct nk_context *ctx, struct nk_rect r, float radius, int accent,
             l = mp_shade_down(l, k);
             rr = mp_shade_down(rr, k);
         }
-        nk_fill_rect_multi_color(canvas, r, l, l, rr, rr);
+        if (r.h > 2.0f * radius) {
+            /* Rounded caps at the top and bottom, then a straight-sided
+             * gradient body between them. The body spans only the straight
+             * sides of the silhouette, so no square corner can poke out. */
+            nk_fill_rect(canvas, nk_rect(r.x, r.y, r.w, 2.0f * radius), radius, l);
+            nk_fill_rect(canvas, nk_rect(r.x, r.y + r.h - 2.0f * radius, r.w,
+                                         2.0f * radius), radius, rr);
+            nk_fill_rect_multi_color(canvas,
+                nk_rect(r.x, r.y + radius, r.w, r.h - 2.0f * radius),
+                l, l, rr, rr);
+        } else {
+            /* Pill too short for caps: one rounded rect in the mid colour. */
+            nk_fill_rect(canvas, r, radius, mp_col_lerp(l, rr, 0.5f));
+        }
     } else {
         /* `lift` is eased 0..1 already; mixing the whole step here and the
          * per-frame easing above would square the curve. */
@@ -610,11 +623,14 @@ mp_btn_gloss(struct nk_context *ctx, struct nk_rect r, float radius,
 {
     struct nk_command_buffer *canvas = nk_window_get_canvas(ctx);
     struct nk_rect inner;
-    float band_h;
+    float band_h, vinset;
 
-    inner = nk_rect(r.x + radius + border, r.y + radius + border,
-                    r.w - 2.0f * (radius + border),
-                    r.h - 2.0f * (radius + border));
+    /* Vertical inset is capped at 30% of the height so a pill (radius = h/2)
+     * keeps a usable band; horizontal stays at the radius so it clears the
+     * curved ends. Corner-radius buttons are below the cap, so unchanged. */
+    vinset = (radius < 0.3f * r.h ? radius : 0.3f * r.h) + border;
+    inner = nk_rect(r.x + radius + border, r.y + vinset,
+                    r.w - 2.0f * (radius + border), r.h - 2.0f * vinset);
     if (inner.w <= 0.0f || inner.h <= 0.0f)
         return;
 
@@ -735,6 +751,11 @@ mp_button(struct nk_context *ctx, float scale, const struct MpTheme *th,
         hovered = nk_input_is_mouse_hovering_rect(&ctx->input, r) ? 1 : 0;
         if (hovered && nk_input_is_mouse_pressed(&ctx->input, NK_BUTTON_LEFT))
             anim->pressed = 1;
+        else if (hovered && !nk_input_is_mouse_down(&ctx->input, NK_BUTTON_LEFT) &&
+                 ctx->input.mouse.buttons[NK_BUTTON_LEFT].clicked >= 2)
+            /* Press and release both landed within one frame: Nuklear counts
+             * each edge, so the held state was never seen. Still a click. */
+            clicked = 1;
         if (anim->pressed) {
             if (nk_input_is_mouse_released(&ctx->input, NK_BUTTON_LEFT)) {
                 anim->pressed = 0;
@@ -749,14 +770,19 @@ mp_button(struct nk_context *ctx, float scale, const struct MpTheme *th,
     }
 
     /* Enter (or Space, which main() consumes before it reaches this context,
-     * so only Enter arrives) activates the focused button. nk_input_is_key_
-     * pressed latches for as long as the key is held, so the press edge is
-     * the down state crossed with the context's keyboard repeat counter --
-     * which main() feeds from SDL with key repeat filtered out. */
+     * so only Enter arrives) activates the focused button. Nuklear counts each
+     * key edge in the frame, so one tap is either "down with one edge" (press
+     * this frame) or "up with two edges" (press and release this frame). main()
+     * drops Enter key-repeat events before they reach this context, so a held
+     * key does not add edges. */
     focused = opt && tab != 0 && tab == opt->focus_slot;
-    if (focused && !disabled && nk_input_is_key_down(&ctx->input, NK_KEY_ENTER) &&
-        ctx->input.keyboard.keys[NK_KEY_ENTER].clicked >= 1 && ctx->input.keyboard.keys[NK_KEY_ENTER].clicked < 2)
-        clicked = 1;
+    if (focused && !disabled) {
+        int down = nk_input_is_key_down(&ctx->input, NK_KEY_ENTER);
+        int edges = ctx->input.keyboard.keys[NK_KEY_ENTER].clicked;
+
+        if ((down && edges == 1) || (!down && edges == 2))
+            clicked = 1;
+    }
 
     /* Hover dims while the pointer is down elsewhere (a drag over the button
      * is not a hover), but only a press that began here sinks the face. */
@@ -785,7 +811,7 @@ mp_button(struct nk_context *ctx, float scale, const struct MpTheme *th,
                             : mp_col_lerp(th->border, th->border_strong,
                                           anim->hover));
 
-    if (focused)
+    if (focused && !disabled)
         nk_stroke_rect(canvas,
                        nk_rect(r.x - mp_s(2.0f, scale), r.y - mp_s(2.0f, scale),
                                r.w + mp_s(4.0f, scale), r.h + mp_s(4.0f, scale)),
