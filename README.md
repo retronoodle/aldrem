@@ -130,6 +130,18 @@ Shared state (position, duration, volume, status) sits behind a single mutex; th
 
 Licenses for the vendored libraries live alongside them in [`vendor/`](vendor/); each vendored header keeps its own upstream license (Nuklear, minimp3, dr_flac and stb_vorbis are public domain/MIT-0, SDL2 is zlib).
 
+## Known limitations
+
+- **Ogg:** Vorbis only. Ogg Opus, Ogg FLAC and Speex are not decoded; chained Ogg files stop at the first logical stream, so they may play (and report a duration) shorter than the file.
+- **FLAC:** stereo or mono. Multichannel FLAC is not supported, and neither is Ogg-encapsulated FLAC.
+- **Channels:** mono and stereo only — there is no surround or multichannel mixing. Everything is converted to 44.1 kHz stereo float32 for the device.
+- **Playlists:** no reordering, repeat or shuffle yet.
+- **Tags:** file and track names come from the path; embedded metadata is not read.
+
+## Contributing
+
+Bug reports and PRs are welcome. See [`CONTRIBUTING.md`](CONTRIBUTING.md) for the build, the C99 style and how to add a format, and [`SECURITY.md`](SECURITY.md) for reporting vulnerabilities privately. This project follows the [Contributor Covenant](CODE_OF_CONDUCT.md).
+
 ## License
 
 [MIT](LICENSE) © 2026 Tim Monaghan. This includes the app icon (`packaging/`).

@@ -1,0 +1,22 @@
+name: Documentation
+description: A typo, a missing instruction, or something misleading in the docs.
+title: "[docs] "
+labels: ["documentation"]
+body:
+  - type: input
+    id: location
+    attributes:
+      label: Where
+      description: File and section, or a link.
+    validations:
+      required: true
+  - type: textarea
+    id: issue
+    attributes:
+      label: What's wrong or missing
+    validations:
+      required: true
+  - type: textarea
+    id: suggestion
+    attributes:
+      label: Suggested wording
