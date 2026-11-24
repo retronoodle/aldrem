@@ -54,9 +54,8 @@ struct VizView {
     float tick_avg;             /* slow average of block energy, for the tick detector */
     float tick;                 /* transient envelope, 0..1, jumps on clicks */
     float prev_tick;            /* last frame's tick, to find click rises */
-    float shape_p;              /* ring superellipse exponent now, eases to target */
-    float shape_p_tgt;          /* ring exponent picked at each section change */
-    float shape_depth;          /* star-point depth, follows mids and kicks */
+    float outline[VIZ_OUTLINE_N]; /* spectrum outline the background shape follows */
+    float shape_depth;          /* outline depth, follows the level and kicks */
     unsigned int rng;           /* xorshift state for the music-driven choices */
     struct MpAnim mode_anim[VIZ_MODE_COUNT];
     struct MpAnim fs_anim;
@@ -85,8 +84,8 @@ static const float PHX_HI[3] = {0.65f,  0.25f,  0.10f};
 #define NOVELTY_THRESHOLD 0.15f
 #define SECTION_COOLDOWN  4.0f
 static const float PHX_OFF[3] = {0.12f, 0.10f, 0.08f};
-/* Ring shape: superellipse exponent (circle at 2) and star-point depth cap. */
-#define SHAPE_DEPTH_MAX 0.5f
+/* Background shape: the spectrum outline's depth cap. */
+#define SHAPE_DEPTH_MAX 0.9f
 
 /* Puts the music memory back to the classic look. Used at creation and on
  * reopen, so each visible run starts from the same picture. */
@@ -107,8 +106,7 @@ motion_reset(VizView *v)
     v->tick_avg = 0.0f;
     v->tick = 0.0f;
     v->prev_tick = 0.0f;
-    v->shape_p = 2.0f;
-    v->shape_p_tgt = 2.0f;
+    memset(v->outline, 0, sizeof v->outline);
     v->shape_depth = 0.0f;
     for (k = 0; k < 3; ++k)
         v->phx_off[k] = 0.0f;
@@ -249,7 +247,6 @@ viz_view_update(VizView *v, const VizSettings *s, float dt, int active,
      * hold the picture still. */
     {
         static const int segs_choice[4] = {4, 5, 6, 8};
-        static const float shape_p_choice[4] = {1.3f, 2.0f, 3.0f, 4.0f};
         const float ka = 1.0f - expf(-dt * 0.25f);  /* about a 4 s average */
         const float glide = 1.0f - expf(-dt * 0.5f); /* about a 2 s centre glide */
         const float kick_rise = (!reduce_motion && v->kick > v->prev_kick)
@@ -280,7 +277,6 @@ viz_view_update(VizView *v, const VizSettings *s, float dt, int active,
                 v->anchor = (v->anchor + 1 + (int)(viz_rand01(&v->rng)
                                 * (VIZ_JULIA_ANCHORS - 1))) % VIZ_JULIA_ANCHORS;
             v->segs = segs_choice[(int)(viz_rand01(&v->rng) * 4.0f) % 4];
-            v->shape_p_tgt = shape_p_choice[(int)(viz_rand01(&v->rng) * 4.0f) % 4];
             for (k = 0; k < 3; ++k)
                 v->phx_off[k] = (viz_rand01(&v->rng) * 2.0f - 1.0f) * PHX_OFF[k];
             v->novelty_cool = SECTION_COOLDOWN;
@@ -301,18 +297,16 @@ viz_view_update(VizView *v, const VizSettings *s, float dt, int active,
         for (k = 0; k < 2; ++k)
             v->ctr[k] += (tgt[k] - v->ctr[k]) * glide;
 
-        /* Ring shape eases between exponents, and star points follow the mids
-         * (slow) and the kicks (fast). Under reduce_motion both go back to the
-         * classic circle. */
+        /* The background shape is the spectrum wrapped around it. Its depth
+         * follows the gated level, with a kick punch, and eases so it morphs.
+         * Under reduce_motion it goes back to the plain circle. */
         {
-            const float p_tgt = reduce_motion ? 2.0f : v->shape_p_tgt;
             const float depth_tgt = reduce_motion ? 0.0f
                 : fminf(SHAPE_DEPTH_MAX,
-                        0.45f * v->mid * v->master + 0.2f * v->kick);
-            const float p_ease = 1.0f - expf(-dt * 0.7f);
+                        v->master * (0.7f + 0.2f * v->kick));
             const float d_ease = 1.0f - expf(-dt * 4.0f);
 
-            v->shape_p += (p_tgt - v->shape_p) * p_ease;
+            viz_outline(v->cbars, nb, v->outline, VIZ_OUTLINE_N);
             v->shape_depth += (depth_tgt - v->shape_depth) * d_ease;
         }
         v->prev_kick = v->kick;
@@ -416,8 +410,9 @@ fractal_render(VizView *v, const VizSettings *s)
             /* The distance is a morphing superellipse with star points, drifted
              * by the kick wander; at p=2 and no depth it is the old circle. */
             const float ring = v->cbars[viz_ring_bin(
-                viz_shape_metric(u - v->wander[0], w - v->wander[1], v->segs,
-                                 v->shape_depth, rot, v->shape_p), s->bars)];
+                viz_shape_metric(u - v->wander[0], w - v->wander[1],
+                                 v->outline, VIZ_OUTLINE_N, v->shape_depth),
+                s->bars)];
             const size_t idx = (size_t)y * FRACTAL_W + (size_t)x;
             float fre, fim, r, g, b, sr, sg, sb, pr, pg, pb, k;
             unsigned int prev;

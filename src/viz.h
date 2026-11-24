@@ -69,13 +69,18 @@ float viz_centroid(const float *bars, int n);
  * log-spaced so bass sits at the centre. */
 int viz_ring_bin(float r, int nbars);
 
-/* Shape metric for the fractal rings, replacing plain radius. u, w are the
- * screen-normalised offsets from the centre. p is the superellipse exponent
- * (2 = circle, 1 = diamond, 4 = squircle), normalised so the corner maps to 1
- * at p=2 (matching sqrt(u*u+w*w)/sqrt(2)). petals and phase give depth-scaled
- * star points: depth 0 leaves the shape unchanged. The result feeds
- * viz_ring_bin. */
-float viz_shape_metric(float u, float w, int petals, float depth, float phase, float p);
+/* Spectrum outline for the fractal's background shape: n values from bass
+ * (index 0) to treble (index n-1), resampled from nbars bars, with the mean
+ * removed so a flat spectrum gives a flat outline. */
+#define VIZ_OUTLINE_N 64
+void viz_outline(const float *bars, int nbars, float *out, int n);
+
+/* Shape metric for the fractal rings. u, w are the screen-normalised offsets
+ * from the centre. The distance is the circle (sqrt(u*u+w*w)/sqrt(2)) divided
+ * by 1 + depth * outline, where the outline is read at the point's angle,
+ * folded left-right with bass at the bottom and treble at the top. depth 0
+ * leaves the plain circle. The result feeds viz_ring_bin. */
+float viz_shape_metric(float u, float w, const float *outline, int n, float depth);
 
 /* Smooth escape count for colouring: n iterations and |z| at escape give a
  * fractional value, so colour bands blend instead of stepping. */

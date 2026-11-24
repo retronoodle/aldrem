@@ -370,55 +370,87 @@ main(void)
         CHECK(viz_novelty(avg, far, 0) == 0.0f, "novelty of no bars is zero");
     }
 
-    /* Shape metric: at p=2 with no depth it is the old circle distance. */
+    /* Shape metric and spectrum outline for the background shape. */
     {
-        int j;
-        int same = 1, diamond_ok = 1, rot_ok = 1, finite = 1, mono = 1;
-        float prev = -1.0f;
+        float flat[VIZ_OUTLINE_N], bars_flat[16], bars_bass[16], out[VIZ_OUTLINE_N];
+        float zero_out[VIZ_OUTLINE_N];
+        int j, k;
+        int same = 1, mirror = 1, finite = 1, mono = 1, lift = 1;
+        int flat_ok = 1, zero_ok = 1, mean_ok = 1;
+        float prev = -1.0f, mean = 0.0f;
 
+        /* Zero depth is the plain circle, whatever the outline holds. */
+        for (k = 0; k < VIZ_OUTLINE_N; ++k)
+            flat[k] = (k % 2) ? 0.4f : -0.4f;
         for (j = 0; j < 40; ++j) {
             const float a = (float)j * 0.157f;
             const float u = 0.9f * cosf(a), w = 0.6f * sinf(a);
             const float old = sqrtf(u * u + w * w) * 0.70710678f;
-            if (fabsf(viz_shape_metric(u, w, 6, 0.0f, 0.0f, 2.0f) - old) > 1e-5f)
+            if (fabsf(viz_shape_metric(u, w, flat, VIZ_OUTLINE_N, 0.0f) - old) > 1e-5f)
                 same = 0;
         }
-        CHECK(same, "shape metric matches the circle at p=2 with no depth");
+        CHECK(same, "shape metric is the circle with no depth, whatever the outline");
 
-        /* p=1 is a diamond: the corner maps to 1, an axis tip to 0.5. */
-        diamond_ok = fabsf(viz_shape_metric(1.0f, 1.0f, 6, 0.0f, 0.0f, 1.0f) - 1.0f) < 1e-5f
-                  && fabsf(viz_shape_metric(1.0f, 0.0f, 6, 0.0f, 0.0f, 1.0f) - 0.5f) < 1e-5f;
-        CHECK(diamond_ok, "diamond maps the corner to 1 and the axis tip to 0.5");
-
-        /* p=4 is squarer: an off-axis point sits closer to the edge than at p=2. */
-        CHECK(viz_shape_metric(1.0f, 0.7f, 6, 0.0f, 0.0f, 4.0f)
-              > viz_shape_metric(1.0f, 0.7f, 6, 0.0f, 0.0f, 2.0f),
-              "squircle is squarer than the circle");
-
-        /* n-fold symmetry at p=2: rotating by 2*pi/n leaves the metric alone. */
+        /* Left and right of the centre line look up the same outline. */
         for (j = 0; j < 20; ++j) {
             const float a = (float)j * 0.31f;
-            const float phi = 2.0f * 3.14159265f / 5.0f;
             const float u = 0.7f * cosf(a), w = 0.7f * sinf(a);
-            const float ru = 0.7f * cosf(a + phi), rw = 0.7f * sinf(a + phi);
-            if (fabsf(viz_shape_metric(u, w, 5, 0.4f, 0.0f, 2.0f)
-                      - viz_shape_metric(ru, rw, 5, 0.4f, 0.0f, 2.0f)) > 1e-4f)
-                rot_ok = 0;
+            if (fabsf(viz_shape_metric(u, w, flat, VIZ_OUTLINE_N, 0.6f)
+                      - viz_shape_metric(-u, w, flat, VIZ_OUTLINE_N, 0.6f)) > 1e-5f)
+                mirror = 0;
         }
-        CHECK(rot_ok, "petals repeat every 2*pi/n");
+        CHECK(mirror, "shape is mirrored left to right");
 
-        /* Finite at the origin and at maximum depth, and along a ray at depth 0 it grows. */
-        finite = isfinite(viz_shape_metric(0.0f, 0.0f, 6, 0.5f, 0.0f, 2.0f))
-              && isfinite(viz_shape_metric(0.3f, -0.2f, 6, 0.5f, 1.0f, 3.0f));
+        /* Finite at the origin and at full depth. */
+        finite = isfinite(viz_shape_metric(0.0f, 0.0f, flat, VIZ_OUTLINE_N, 0.9f))
+              && isfinite(viz_shape_metric(0.3f, -0.2f, flat, VIZ_OUTLINE_N, 0.9f));
         CHECK(finite, "shape metric is finite at the origin and at full depth");
+
+        /* Along a ray at zero depth it still grows outward. */
         for (j = 1; j <= 20; ++j) {
-            const float m = viz_shape_metric((float)j * 0.05f, 0.0f, 6, 0.0f, 0.0f, 2.0f);
+            const float m = viz_shape_metric((float)j * 0.05f, 0.0f, flat, VIZ_OUTLINE_N, 0.0f);
             if (m <= prev)
                 mono = 0;
             prev = m;
         }
         CHECK(mono, "shape metric grows outward along a ray at zero depth");
-        CHECK(diamond_ok && same && rot_ok && finite && mono, "shape metric checks pass");
+
+        /* A louder band at the bottom (outline index 0) bulges the bottom: the
+         * same point at the bottom reads closer in than at the side. */
+        for (k = 0; k < VIZ_OUTLINE_N; ++k)
+            flat[k] = 0.0f;
+        flat[0] = 0.5f;
+        flat[VIZ_OUTLINE_N - 1] = 0.0f;
+        lift = viz_shape_metric(0.0f, 0.6f, flat, VIZ_OUTLINE_N, 0.5f)
+             < viz_shape_metric(0.6f, 0.0f, flat, VIZ_OUTLINE_N, 0.5f);
+        CHECK(lift, "a loud bass band pulls the bottom of the shape outward");
+
+        /* Outline: flat spectrum gives zeros, a mean of zero, and no bars gives zeros. */
+        for (k = 0; k < 16; ++k) {
+            bars_flat[k] = 0.3f;
+            bars_bass[k] = (k < 4) ? 0.9f : 0.1f;
+        }
+        viz_outline(bars_flat, 16, out, VIZ_OUTLINE_N);
+        for (k = 0; k < VIZ_OUTLINE_N; ++k)
+            if (fabsf(out[k]) > 1e-6f)
+                flat_ok = 0;
+        CHECK(flat_ok, "a flat spectrum gives a flat outline");
+
+        viz_outline(bars_bass, 16, out, VIZ_OUTLINE_N);
+        for (k = 0; k < VIZ_OUTLINE_N; ++k)
+            mean += out[k];
+        mean /= (float)VIZ_OUTLINE_N;
+        mean_ok = fabsf(mean) < 0.05f && out[0] > 0.0f && out[VIZ_OUTLINE_N - 1] < 0.0f;
+        CHECK(mean_ok, "outline is zero-mean, bass high at index 0, treble low at the end");
+
+        viz_outline(bars_bass, 0, zero_out, VIZ_OUTLINE_N);
+        for (k = 0; k < VIZ_OUTLINE_N; ++k)
+            if (zero_out[k] != 0.0f)
+                zero_ok = 0;
+        CHECK(zero_ok, "outline of no bars is zero");
+
+        CHECK(same && mirror && finite && mono && lift && flat_ok && mean_ok && zero_ok,
+              "shape outline checks pass");
     }
 
     /* Anchors: every one sits inside |c| <= 1.2, and indices wrap. */

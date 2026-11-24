@@ -495,16 +495,64 @@ viz_novelty(const float *avg, const float *cur, int n)
     return sum / (float)n;
 }
 
-float
-viz_shape_metric(float u, float w, int petals, float depth, float phase, float p)
+void
+viz_outline(const float *bars, int nbars, float *out, int n)
 {
-    const float au = fabsf(u), aw = fabsf(w);
-    float r, div;
+    /* Mean removed, so a flat spectrum gives a flat outline (a circle). The
+     * table runs bass (index 0) to treble (index n-1), resampled linearly. */
+    float mean = 0.0f, pos;
+    int i, b0, b1;
 
-    if (p < 1.0f)
-        p = 1.0f;
-    r = powf(powf(au, p) + powf(aw, p), 1.0f / p) / powf(2.0f, 1.0f / p);
-    div = 1.0f + depth * cosf((float)petals * atan2f(w, u) + phase);
+    if (n <= 0)
+        return;
+    for (i = 0; i < nbars; ++i)
+        mean += bars[i];
+    mean = nbars > 0 ? mean / (float)nbars : 0.0f;
+    for (i = 0; i < n; ++i) {
+        float f, v;
+
+        if (nbars < 1) {
+            out[i] = 0.0f;
+            continue;
+        }
+        pos = n > 1 ? (float)i / (float)(n - 1) * (float)(nbars - 1) : 0.0f;
+        b0 = (int)pos;
+        if (b0 >= nbars)
+            b0 = nbars - 1;
+        b1 = b0 + 1 < nbars ? b0 + 1 : nbars - 1;
+        f = pos - (float)b0;
+        v = bars[b0] * (1.0f - f) + bars[b1] * f;
+        out[i] = v - mean;
+    }
+}
+
+float
+viz_shape_metric(float u, float w, const float *outline, int n, float depth)
+{
+    /* Circle distance on the p=2 scale, so zero depth is the plain circle. The
+     * angle is folded left-right, measured from the bottom of the screen up,
+     * and looks up the outline: bass at the bottom, treble at the top. */
+    const float r = sqrtf(u * u + w * w) / sqrtf(2.0f);
+    float div, t, pos, f, o;
+    int i0, i1;
+
+    if (depth <= 0.0f || !outline || n < 1)
+        return r;
+    t = atan2f(fabsf(u), w) / 3.14159265f; /* 0 at the bottom, 1 at the top */
+    pos = t * (float)(n - 1);
+    i0 = (int)pos;
+    if (i0 < 0)
+        i0 = 0;
+    if (i0 > n - 1)
+        i0 = n - 1;
+    i1 = i0 + 1 < n ? i0 + 1 : n - 1;
+    f = pos - (float)i0;
+    if (f < 0.0f)
+        f = 0.0f;
+    if (f > 1.0f)
+        f = 1.0f;
+    o = outline[i0] * (1.0f - f) + outline[i1] * f;
+    div = 1.0f + depth * o;
     if (div < 0.4f)
         div = 0.4f;
     return r / div;
