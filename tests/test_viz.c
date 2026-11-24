@@ -535,7 +535,7 @@ main(void)
         {
             float p;
             for (p = -1.0f; p <= 1.0f; p += 0.25f) {
-                float x = viz_pan_to_x(p, 0.0f);
+                float x = viz_pan_to_x(p, 0.0f, 0.0f);
                 if (x < x_prev)
                     bounded = 0;
                 if (x < -0.71f || x > 0.71f)
@@ -543,8 +543,109 @@ main(void)
                 x_prev = x;
             }
             CHECK(bounded, "pan maps monotonically within the stage");
-            CHECK(viz_pan_to_x(1.0f, 1.0f) <= 0.71f, "pan with jitter stays on stage");
+            CHECK(viz_pan_to_x(1.0f, 1.0f, 1.0f) <= 0.71f, "pan with jitter stays on stage");
         }
+    }
+
+    /* Stereo width, actor drift, and the left/right background shape. */
+    {
+        float l[8], r[8], ol[VIZ_OUTLINE_N], orr[VIZ_OUTLINE_N], bl[16], br[16];
+        float oe[VIZ_OUTLINE_N], pair_l[VIZ_OUTLINE_N], pair_r[VIZ_OUTLINE_N];
+        float w_mono, w_out, w_silent, w_one;
+        VizActor a;
+        int k, width_ok = 1, same_ok = 1, shape_same = 1, seam_ok = 1;
+        float x_prev = 0.0f;
+
+        for (k = 0; k < 8; ++k)
+            l[k] = r[k] = 0.3f * (float)(k % 3) - 0.2f;
+        w_mono = viz_width(l, r, 8);
+        CHECK(w_mono == 0.0f, "mono has zero width");
+
+        for (k = 0; k < 8; ++k)
+            r[k] = -l[k];
+        w_out = viz_width(l, r, 8);
+        CHECK(w_out == 1.0f, "out of phase clamps to full width");
+
+        for (k = 0; k < 8; ++k)
+            l[k] = r[k] = 0.0f;
+        w_silent = viz_width(l, r, 8);
+        CHECK(w_silent == 0.0f, "silence has zero width");
+
+        for (k = 0; k < 8; ++k) {
+            l[k] = 0.5f;
+            r[k] = 0.0f;
+        }
+        w_one = viz_width(l, r, 8);
+        width_ok = w_one >= 0.0f && w_one <= 1.0f;
+        CHECK(width_ok, "width stays within 0..1");
+
+        /* Drift: eases toward the target, never past it, and does nothing if
+         * the actor is releasing or not live. */
+        memset(&a, 0, sizeof a);
+        a.live = 1;
+        a.x = 0.0f;
+        for (k = 0; k < 200; ++k) {
+            viz_actor_drift(&a, 0.05f, 0.5f);
+            if (a.x > 0.5f + 1e-6f)
+                seam_ok = 0;
+        }
+        CHECK(seam_ok && fabsf(a.x - 0.5f) < 1e-3f, "drift converges without overshoot");
+        a.releasing = 1;
+        x_prev = a.x;
+        viz_actor_drift(&a, 0.05f, -0.5f);
+        CHECK(a.x == x_prev, "releasing actor does not drift");
+        a.releasing = 0;
+        a.live = 0;
+        viz_actor_drift(&a, 0.05f, -0.5f);
+        CHECK(a.x == x_prev, "dead actor does not drift");
+
+        /* Outlines: identical sides match the mono outline; a lopsided mix
+         * bulges one way on the left and the other on the right. */
+        for (k = 0; k < 16; ++k)
+            bl[k] = br[k] = 0.1f + 0.05f * (float)(k % 4);
+        viz_outline(bl, 16, oe, VIZ_OUTLINE_N);
+        viz_outline_pair(bl, br, 16, pair_l, pair_r, VIZ_OUTLINE_N);
+        for (k = 0; k < VIZ_OUTLINE_N; ++k)
+            if (fabsf(pair_l[k] - oe[k]) > 1e-6f || fabsf(pair_r[k] - oe[k]) > 1e-6f)
+                same_ok = 0;
+        CHECK(same_ok, "identical sides give the mono outline");
+
+        for (k = 0; k < 16; ++k) {
+            bl[k] = 0.8f;
+            br[k] = 0.2f;
+        }
+        viz_outline_pair(bl, br, 16, pair_l, pair_r, VIZ_OUTLINE_N);
+        CHECK(pair_l[0] > 0.0f && pair_r[0] < 0.0f,
+              "a lopsided mix bulges to its own side");
+
+        /* Shape metric: identical halves match the plain metric; a lopsided
+         * pair differs at mirrored points; the seam is finite. */
+        for (k = 0; k < VIZ_OUTLINE_N; ++k) {
+            ol[k] = 0.3f;
+            orr[k] = -0.3f;
+        }
+        for (k = 0; k < VIZ_OUTLINE_N; ++k)
+            pair_l[k] = pair_r[k] = 0.25f;
+        {
+            const float plain = viz_shape_metric(0.4f, 0.5f, pair_l, VIZ_OUTLINE_N, 0.5f);
+            const float lr = viz_shape_metric_lr(0.4f, 0.5f, pair_l, pair_r, VIZ_OUTLINE_N, 0.5f);
+            if (fabsf(plain - lr) > 1e-6f)
+                shape_same = 0;
+        }
+        CHECK(shape_same, "identical halves match the plain shape metric");
+        {
+            const float m_left = viz_shape_metric_lr(-0.5f, 0.5f, ol, orr, VIZ_OUTLINE_N, 0.5f);
+            const float m_right = viz_shape_metric_lr(0.5f, 0.5f, ol, orr, VIZ_OUTLINE_N, 0.5f);
+            CHECK(fabsf(m_left - m_right) > 1e-3f,
+                  "a lopsided shape differs left and right");
+        }
+        for (k = -10; k <= 10; ++k) {
+            const float m = viz_shape_metric_lr((float)k * 0.02f, 0.4f, ol, orr,
+                                                VIZ_OUTLINE_N, 0.5f);
+            if (!isfinite(m))
+                seam_ok = 0;
+        }
+        CHECK(seam_ok, "the shape is finite across the seam");
     }
 
     /* Actors: slots, spawn placement and ageing. */

@@ -7,7 +7,11 @@
 #define VIZ_BARS_MIN  8
 #define VIZ_BARS_MAX  96
 
-typedef enum { VIZ_SPECTRUM = 0, VIZ_WAVE = 1, VIZ_FRACTAL = 2, VIZ_MODE_COUNT } VizMode;
+/* Stereo and Scope are appended so saved viz_mode values keep their meaning. */
+typedef enum {
+    VIZ_SPECTRUM = 0, VIZ_WAVE = 1, VIZ_FRACTAL = 2, VIZ_STEREO = 3, VIZ_SCOPE = 4,
+    VIZ_MODE_COUNT
+} VizMode;
 
 /* User-tunable visualizer settings. Percent fields are 0..100 unless noted. */
 typedef struct {
@@ -141,6 +145,7 @@ typedef struct {
     int band;          /* onset group that spawned it, 0 bass .. groups-1 treble */
     float cr, ci;      /* Julia constant, a curated anchor */
     float x, y;        /* centre on the stage, in the fractal's -1..1 units */
+    float jit;         /* spawn spread, -1..1: x follows the pan around it */
     float size;        /* radius on the stage, same units; smaller for treble */
     float hue;         /* hue offset from the view's hue */
     float bright;      /* brightness multiplier: dim bass, over-bright treble */
@@ -159,8 +164,23 @@ void viz_onset(const float *bars, const float *avg, int nbars, float *rise, int 
 /* Per-band stereo balance -1 (all left) .. +1 (all right), 0 centred or silent,
  * from the left and right bar arrays over the same bands as viz_onset. */
 void viz_pan(const float *bars_l, const float *bars_r, int nbars, float *pan, int groups);
-/* Stage x for an actor from a balance and a -1..1 jitter, kept within ±0.7. */
-float viz_pan_to_x(float pan, float jitter);
+/* Stage x for an actor from a balance, a -1..1 jitter and the mix's width
+ * 0..1 (a wide mix spreads the burst, a mono mix pulls it tight), kept within ±0.7. */
+float viz_pan_to_x(float pan, float jitter, float width);
+/* Stereo width 0..1 from the left and right samples: 0 mono or silent, 1 wide or
+ * out of phase. */
+float viz_width(const float *l, const float *r, int n);
+/* Eases an actor's x toward target_x. Does nothing unless live and not releasing. */
+void viz_actor_drift(VizActor *a, float dt, float target_x);
+/* Outlines for the left and right halves of the background shape, sharing one
+ * mean so a lopsided mix bulges to one side. */
+void viz_outline_pair(const float *bars_l, const float *bars_r, int nbars,
+                      float *out_l, float *out_r, int n);
+/* Like viz_shape_metric, but the left half (u < 0) reads out_l and the right
+ * (u >= 0) reads out_r, with a short crossfade across the seam. Identical
+ * outlines give exactly viz_shape_metric. */
+float viz_shape_metric_lr(float u, float w, const float *out_l, const float *out_r,
+                          int n, float depth);
 
 /* Slot to use for a new actor among n: a free one, else the dimmest releasing
  * one, else the dimmest overall, with sparks given up before extras and leads.

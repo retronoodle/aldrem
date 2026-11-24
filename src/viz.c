@@ -495,19 +495,14 @@ viz_novelty(const float *avg, const float *cur, int n)
     return sum / (float)n;
 }
 
-void
-viz_outline(const float *bars, int nbars, float *out, int n)
+/* Resamples bars linearly onto n outline points, bass to treble, with mean
+ * subtracted. */
+static void
+outline_fill(const float *bars, int nbars, float mean, float *out, int n)
 {
-    /* Mean removed, so a flat spectrum gives a flat outline (a circle). The
-     * table runs bass (index 0) to treble (index n-1), resampled linearly. */
-    float mean = 0.0f, pos;
+    float pos;
     int i, b0, b1;
 
-    if (n <= 0)
-        return;
-    for (i = 0; i < nbars; ++i)
-        mean += bars[i];
-    mean = nbars > 0 ? mean / (float)nbars : 0.0f;
     for (i = 0; i < n; ++i) {
         float f, v;
 
@@ -526,17 +521,58 @@ viz_outline(const float *bars, int nbars, float *out, int n)
     }
 }
 
+void
+viz_outline(const float *bars, int nbars, float *out, int n)
+{
+    /* Mean removed, so a flat spectrum gives a flat outline (a circle). The
+     * table runs bass (index 0) to treble (index n-1), resampled linearly. */
+    float mean = 0.0f;
+    int i;
+
+    if (n <= 0)
+        return;
+    for (i = 0; i < nbars; ++i)
+        mean += bars[i];
+    mean = nbars > 0 ? mean / (float)nbars : 0.0f;
+    outline_fill(bars, nbars, mean, out, n);
+}
+
+void
+viz_outline_pair(const float *bars_l, const float *bars_r, int nbars,
+                 float *out_l, float *out_r, int n)
+{
+    /* One mean across both sides: a lopsided mix stays lopsided rather than
+     * each side being centred on its own level. */
+    float mean = 0.0f;
+    int i;
+
+    if (n <= 0)
+        return;
+    for (i = 0; i < nbars; ++i)
+        mean += bars_l[i] + bars_r[i];
+    mean = nbars > 0 ? mean / (float)(2 * nbars) : 0.0f;
+    outline_fill(bars_l, nbars, mean, out_l, n);
+    outline_fill(bars_r, nbars, mean, out_r, n);
+}
+
+/* Half-width of the crossfade between the left and right outlines, in u units,
+ * centred on the seam at u = 0. */
+#define SHAPE_SEAM 0.12f
+
 float
-viz_shape_metric(float u, float w, const float *outline, int n, float depth)
+viz_shape_metric_lr(float u, float w, const float *out_l, const float *out_r,
+                    int n, float depth)
 {
     /* Circle distance on the p=2 scale, so zero depth is the plain circle. The
-     * angle is folded left-right, measured from the bottom of the screen up,
-     * and looks up the outline: bass at the bottom, treble at the top. */
+     * angle is measured from the bottom of the screen up, and looks up the
+     * outline: bass at the bottom, treble at the top. Left of centre reads the
+     * left outline, right the right; they blend across the seam so the shape
+     * has no hard edge. */
     const float r = sqrtf(u * u + w * w) / sqrtf(2.0f);
-    float div, t, pos, f, o;
+    float div, t, pos, f, ol, or_, o, wgt;
     int i0, i1;
 
-    if (depth <= 0.0f || !outline || n < 1)
+    if (depth <= 0.0f || !out_l || !out_r || n < 1)
         return r;
     t = atan2f(fabsf(u), w) / 3.14159265f; /* 0 at the bottom, 1 at the top */
     pos = t * (float)(n - 1);
@@ -551,11 +587,26 @@ viz_shape_metric(float u, float w, const float *outline, int n, float depth)
         f = 0.0f;
     if (f > 1.0f)
         f = 1.0f;
-    o = outline[i0] * (1.0f - f) + outline[i1] * f;
+    ol = out_l[i0] * (1.0f - f) + out_l[i1] * f;
+    or_ = out_r[i0] * (1.0f - f) + out_r[i1] * f;
+    /* wgt is 0 well left of the seam, 1 well right, linear across it. Equal
+     * outlines give o = ol exactly, since or_ - ol is then zero. */
+    wgt = u / (2.0f * SHAPE_SEAM) + 0.5f;
+    if (wgt < 0.0f)
+        wgt = 0.0f;
+    else if (wgt > 1.0f)
+        wgt = 1.0f;
+    o = ol + (or_ - ol) * wgt;
     div = 1.0f + depth * o;
     if (div < 0.4f)
         div = 0.4f;
     return r / div;
+}
+
+float
+viz_shape_metric(float u, float w, const float *outline, int n, float depth)
+{
+    return viz_shape_metric_lr(u, w, outline, outline, n, depth);
 }
 
 /* Curated Julia constants: dendrite, rabbit, spiral, Siegel disc, seahorse
@@ -631,15 +682,57 @@ viz_pan(const float *bars_l, const float *bars_r, int nbars, float *pan, int gro
 }
 
 float
-viz_pan_to_x(float pan, float jitter)
+viz_pan_to_x(float pan, float jitter, float width)
 {
-    float x = pan * 0.6f + jitter * 0.1f;
+    float wd = width, spread, x;
 
+    if (wd < 0.0f)
+        wd = 0.0f;
+    else if (wd > 1.0f)
+        wd = 1.0f;
+    /* A wide mix fans its burst out; a mono mix keeps it tight. */
+    spread = jitter * (0.05f + 0.35f * wd);
+    x = pan * 0.6f + spread;
     if (x < -0.7f)
         x = -0.7f;
     else if (x > 0.7f)
         x = 0.7f;
     return x;
+}
+
+float
+viz_width(const float *l, const float *r, int n)
+{
+    double em = 0.0, es = 0.0, sum;
+    int i;
+
+    for (i = 0; i < n; ++i) {
+        const double m = 0.5 * ((double)l[i] + (double)r[i]);
+        const double s = 0.5 * ((double)l[i] - (double)r[i]);
+        em += m * m;
+        es += s * s;
+    }
+    sum = em + es;
+    if (sum < 1e-12)
+        return 0.0f;
+    /* Side over total: 0 for mono, rising toward 1 as the sides decorrelate;
+     * an out-of-phase mix clamps to 1. */
+    {
+        const double w = 2.0 * es / sum;
+        return (float)(w > 1.0 ? 1.0 : w);
+    }
+}
+
+/* How fast an actor's x eases toward its pan target, per second. */
+#define ACTOR_DRIFT 1.5f
+
+void
+viz_actor_drift(VizActor *a, float dt, float target_x)
+{
+    if (!a->live || a->releasing)
+        return;
+    /* The factor is in 0..1, so the ease approaches the target without overshoot. */
+    a->x += (target_x - a->x) * (1.0f - expf(-dt * ACTOR_DRIFT));
 }
 
 int

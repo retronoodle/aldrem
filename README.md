@@ -63,7 +63,7 @@ Format detection works by extension, with magic-byte sniffing as a fallback — 
 
 The top-right meter shows stereo output levels as twin needles or LED bars. Click its `Needle` / `LED` chip to switch; the choice is saved to `$XDG_CONFIG_HOME/aldrem/settings.ini` (falling back to `~/.config/aldrem/`).
 
-The lower band has a `Playlist` and a `Visualizer` tab. The visualizer draws the spectrum, a waveform or a fractal (a kaleidoscopic Julia set with a Phoenix creature that reshapes with the music), shows the track name, and has sliders for gain, smoothing, bar count and hue. Its `Fullscreen` button (or `F11`) fills the screen and keeps the track name on it; the settings are saved with the meter style.
+The lower band has a `Playlist` and a `Visualizer` tab. The visualizer draws the spectrum, a waveform, a fractal (a kaleidoscopic Julia set with a Phoenix creature that reshapes with the music), a stereo bar view, or a goniometer scope, shows the track name, and has sliders for gain, smoothing, bar count and hue. Its `Fullscreen` button (or `F11`) fills the screen and keeps the track name on it; the settings are saved with the meter style.
 
 The progress and volume sliders are live: seek mid-track, adjust volume, and it takes effect immediately. Keys are global except while a dialog or the file browser is open, so typing a path works.
 
