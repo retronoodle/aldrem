@@ -1,6 +1,7 @@
 /* test_viz.c — unit checks for the visualizer maths in src/viz.c. No device. */
 #include <math.h>
 #include <stdio.h>
+#include <string.h>
 
 #include "viz.h"
 
@@ -451,6 +452,144 @@ main(void)
 
         CHECK(same && mirror && finite && mono && lift && flat_ok && mean_ok && zero_ok,
               "shape outline checks pass");
+    }
+
+    /* Onset: a band rising over its slow average fires, steady sound does not. */
+    {
+        float bars[16], avg[16], rise[VIZ_ONSET_GROUPS];
+        int k, steady = 1, spike_ok = 1, small_ok = 1;
+
+        for (k = 0; k < 16; ++k)
+            bars[k] = avg[k] = 0.3f;
+        viz_onset(bars, avg, 16, rise, VIZ_ONSET_GROUPS);
+        for (k = 0; k < VIZ_ONSET_GROUPS; ++k)
+            if (rise[k] != 0.0f)
+                steady = 0;
+        CHECK(steady, "steady spectrum gives no onset");
+
+        /* Six groups over 16 bars: group 2 is bars 5..7. */
+        for (k = 0; k < 16; ++k)
+            bars[k] = 0.3f;
+        bars[5] = bars[6] = bars[7] = 0.8f;
+        viz_onset(bars, avg, 16, rise, VIZ_ONSET_GROUPS);
+        spike_ok = rise[2] > 0.9f;
+        for (k = 0; k < VIZ_ONSET_GROUPS; ++k)
+            if (k != 2 && rise[k] != 0.0f)
+                spike_ok = 0;
+        CHECK(spike_ok, "a rise in one band fires only that band");
+
+        /* A rise under the margin is ignored. */
+        for (k = 0; k < 16; ++k)
+            bars[k] = 0.36f;
+        viz_onset(bars, avg, 16, rise, VIZ_ONSET_GROUPS);
+        for (k = 0; k < VIZ_ONSET_GROUPS; ++k)
+            if (rise[k] != 0.0f)
+                small_ok = 0;
+        CHECK(small_ok, "a rise below the margin is ignored");
+    }
+
+    /* Actors: slots, spawn placement and ageing. */
+    {
+        VizActor pool[VIZ_ACTORS];
+        VizActor one;
+        unsigned int rng = 12345u, rng2 = 12345u;
+        int k, slot_ok = 1, bound_ok = 1, same_ok = 1, size_ok = 1, hue_ok = 1;
+        int finite_ok = 1;
+
+        memset(pool, 0, sizeof pool);
+        CHECK(viz_actor_slot(pool, 0) == -1, "no slots means -1");
+        CHECK(viz_actor_slot(pool, VIZ_ACTORS) == 0, "a free slot is taken first");
+
+        /* All live: a releasing dim one is taken before a bright live one. */
+        for (k = 0; k < VIZ_ACTORS; ++k) {
+            pool[k].live = 1;
+            pool[k].env = 0.9f;
+            pool[k].releasing = 0;
+        }
+        pool[3].env = 0.2f;
+        pool[3].releasing = 1;
+        pool[1].env = 0.05f;   /* dimmer but not releasing */
+        slot_ok = viz_actor_slot(pool, VIZ_ACTORS) == 3;
+        CHECK(slot_ok, "a releasing actor is replaced before a live one");
+
+        /* Spawn across every band and kind: constant bounded, position on stage. */
+        for (k = 0; k < VIZ_ONSET_GROUPS; ++k) {
+            int kind;
+            for (kind = 0; kind < 3; ++kind) {
+                VizActor a;
+                viz_actor_spawn(&a, &rng, kind, k, VIZ_ONSET_GROUPS, 0.5f);
+                if (sqrtf(a.cr * a.cr + a.ci * a.ci) > 1.2f)
+                    bound_ok = 0;
+                if (fabsf(a.x) > 0.71f || fabsf(a.y) > 0.56f)
+                    bound_ok = 0;
+                if (!a.live || a.releasing || a.env != 0.0f)
+                    bound_ok = 0;
+            }
+        }
+        CHECK(bound_ok, "spawned actors have bounded constants and sit on the stage");
+
+        /* Same seed, same actor. */
+        rng = rng2 = 12345u;
+        viz_actor_spawn(&one, &rng, 0, 1, VIZ_ONSET_GROUPS, 0.7f);
+        {
+            VizActor two;
+            viz_actor_spawn(&two, &rng2, 0, 1, VIZ_ONSET_GROUPS, 0.7f);
+            same_ok = one.cr == two.cr && one.ci == two.ci && one.x == two.x
+                   && one.y == two.y && one.size == two.size;
+        }
+        CHECK(same_ok, "the same seed spawns the same actor");
+
+        /* Size: a lead is bigger than an extra, which is bigger than a spark. */
+        {
+            VizActor lead, extra, spark;
+            unsigned int r3 = 999u;
+            viz_actor_spawn(&lead, &r3, VIZ_ACTOR_LEAD, 0, VIZ_ONSET_GROUPS, 0.5f);
+            viz_actor_spawn(&extra, &r3, VIZ_ACTOR_EXTRA, 0, VIZ_ONSET_GROUPS, 0.5f);
+            viz_actor_spawn(&spark, &r3, VIZ_ACTOR_SPARK, 0, VIZ_ONSET_GROUPS, 0.5f);
+            size_ok = lead.size > extra.size && extra.size > spark.size;
+        }
+        CHECK(size_ok, "leads are bigger than extras, which are bigger than sparks");
+
+        /* Hue: bass band is lower than treble band. */
+        {
+            VizActor lo, hi;
+            unsigned int r4 = 4242u;
+            viz_actor_spawn(&lo, &r4, VIZ_ACTOR_EXTRA, 0, VIZ_ONSET_GROUPS, 0.5f);
+            viz_actor_spawn(&hi, &r4, VIZ_ACTOR_SPARK, VIZ_ONSET_GROUPS - 1,
+                            VIZ_ONSET_GROUPS, 0.5f);
+            hue_ok = lo.hue < hi.hue;
+        }
+        CHECK(hue_ok, "bass actors take a lower hue than treble actors");
+
+        /* Ageing: holds on rate 0, releases when presence drops, dies after the
+         * fade, and never goes non-finite. */
+        {
+            VizActor a;
+            unsigned int r5 = 77u;
+            float age_before;
+            int t;
+
+            viz_actor_spawn(&a, &r5, VIZ_ACTOR_EXTRA, 2, VIZ_ONSET_GROUPS, 0.5f);
+            for (t = 0; t < 40; ++t) {       /* 2 s, music running */
+                viz_actor_step(&a, 0.05f, 1.0f, 1.0f);
+                if (!isfinite(a.env) || a.env < 0.0f || a.env > 1.0f)
+                    finite_ok = 0;
+            }
+            CHECK(a.live && a.env > 0.9f, "an actor fades in while its sound holds");
+
+            age_before = a.age;
+            for (t = 0; t < 200; ++t)        /* 10 s of a held tone */
+                viz_actor_step(&a, 0.05f, 0.0f, 1.0f);
+            CHECK(a.live && a.age == age_before && !a.releasing,
+                  "a held tone with no rate holds the actor still");
+
+            for (t = 0; t < 40; ++t)         /* 2 s with the sound gone */
+                viz_actor_step(&a, 0.05f, 1.0f, 0.0f);
+            for (t = 0; t < 400; ++t)        /* 20 s more to finish fading */
+                viz_actor_step(&a, 0.05f, 1.0f, 0.0f);
+            CHECK(!a.live && a.env == 0.0f, "a released actor fades out and frees its slot");
+            CHECK(finite_ok, "actor envelope stays finite and within 0..1");
+        }
     }
 
     /* Anchors: every one sits inside |c| <= 1.2, and indices wrap. */

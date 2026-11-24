@@ -128,4 +128,44 @@ float viz_novelty(const float *avg, const float *cur, int n);
 #define VIZ_JULIA_ANCHORS 6
 void viz_julia_anchor(int idx, float *cr, float *ci);
 
+/* Actors: small Julia blobs on the fractal stage. Each is born from a sound
+ * that rises above its band's slow average (viz_onset), then ages with the
+ * music (viz_actor_step), so a held tone holds the cast and silence clears it. */
+#define VIZ_ACTORS        6
+#define VIZ_ONSET_GROUPS  6
+typedef enum { VIZ_ACTOR_LEAD = 0, VIZ_ACTOR_EXTRA = 1, VIZ_ACTOR_SPARK = 2 } VizActorKind;
+
+typedef struct {
+    int live;          /* slot in use */
+    int kind;          /* VizActorKind */
+    int band;          /* onset group that spawned it, 0 bass .. groups-1 treble */
+    float cr, ci;      /* Julia constant, a curated anchor */
+    float x, y;        /* centre on the stage, in the fractal's -1..1 units */
+    float size;        /* radius on the stage, same units */
+    float hue;         /* hue offset from the view's hue */
+    float age;         /* music time lived, advanced by rate */
+    float life;        /* music time to live before it releases */
+    float env;         /* brightness envelope, 0..1 */
+    int releasing;     /* fading out: set by life, presence loss or a section change */
+} VizActor;
+
+/* Rise of each of groups equal bands of bars over its slow average, 0..1. A
+ * rise must clear a margin above the average, so steady sound gives zero. */
+void viz_onset(const float *bars, const float *avg, int nbars, float *rise, int groups);
+
+/* Slot to use for a new actor among n: a free one, else the dimmest releasing
+ * one, else the dimmest overall. Returns -1 when n is zero. */
+int viz_actor_slot(const VizActor *a, int n);
+
+/* Starts actor a of the given kind (VizActorKind) from onset band of bands,
+ * with strength 0..1 setting its size. Position, size, hue and constant follow
+ * the band, with seeded jitter from rng. */
+void viz_actor_spawn(VizActor *a, unsigned int *rng, int kind, int band,
+                     int bands, float strength);
+
+/* Advances a live actor by dt seconds. Its music-time age advances by dt*rate,
+ * so rate 0 holds it still. presence is its band energy 0..1: when it drops,
+ * or the age reaches its life, the actor releases and fades out. */
+void viz_actor_step(VizActor *a, float dt, float rate, float presence);
+
 #endif

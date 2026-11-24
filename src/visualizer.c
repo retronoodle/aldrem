@@ -56,6 +56,8 @@ struct VizView {
     float prev_tick;            /* last frame's tick, to find click rises */
     float outline[VIZ_OUTLINE_N]; /* spectrum outline the background shape follows */
     float shape_depth;          /* outline depth, follows the level and kicks */
+    VizActor actors[VIZ_ACTORS];                /* the cast on the fractal stage */
+    float actor_cool[VIZ_ONSET_GROUPS + 1];     /* spawn cooldowns per band; last is clicks */
     unsigned int rng;           /* xorshift state for the music-driven choices */
     struct MpAnim mode_anim[VIZ_MODE_COUNT];
     struct MpAnim fs_anim;
@@ -108,8 +110,89 @@ motion_reset(VizView *v)
     v->prev_tick = 0.0f;
     memset(v->outline, 0, sizeof v->outline);
     v->shape_depth = 0.0f;
+    memset(v->actors, 0, sizeof v->actors);
+    memset(v->actor_cool, 0, sizeof v->actor_cool);
     for (k = 0; k < 3; ++k)
         v->phx_off[k] = 0.0f;
+}
+
+/* Actor cooldowns: a band may spawn again after ACTOR_COOL seconds, clicks
+ * after ACTOR_COOL_TICK. A rise must clear the trigger to count as a new sound. */
+#define ACTOR_COOL      1.5f
+#define ACTOR_COOL_TICK 0.6f
+#define ONSET_TRIGGER   0.3f
+#define TICK_TRIGGER    0.3f
+
+/* The stage cast. A section change retires the cast and brings a new lead; a
+ * new sound in a band brings an extra (bass) or a spark (anything higher); a
+ * click brings a spark. Every actor then ages with the music and releases when
+ * the sound that drew it goes quiet. Nothing spawns under reduce_motion. */
+static void
+actors_update(VizView *v, float dt, int nb, int section_fired,
+              float tick_rise, int reduce_motion)
+{
+    float rise[VIZ_ONSET_GROUPS], lvl[VIZ_ONSET_GROUPS];
+    float rate, presence;
+    int g, a, slot;
+
+    for (g = 0; g <= VIZ_ONSET_GROUPS; ++g)
+        if (v->actor_cool[g] > 0.0f)
+            v->actor_cool[g] -= dt;
+
+    if (section_fired) {
+        for (a = 0; a < VIZ_ACTORS; ++a)
+            if (v->actors[a].live)
+                v->actors[a].releasing = 1;
+        slot = viz_actor_slot(v->actors, VIZ_ACTORS);
+        if (slot >= 0)
+            viz_actor_spawn(&v->actors[slot], &v->rng, VIZ_ACTOR_LEAD,
+                            (int)(viz_rand01(&v->rng) * VIZ_ONSET_GROUPS)
+                                % VIZ_ONSET_GROUPS,
+                            VIZ_ONSET_GROUPS, 1.0f);
+    }
+
+    if (!reduce_motion && v->master > 0.0f) {
+        viz_onset(v->cbars, v->spec_avg, nb, rise, VIZ_ONSET_GROUPS);
+        for (g = 0; g < VIZ_ONSET_GROUPS; ++g) {
+            if (rise[g] < ONSET_TRIGGER || v->actor_cool[g] > 0.0f)
+                continue;
+            slot = viz_actor_slot(v->actors, VIZ_ACTORS);
+            if (slot < 0)
+                break;
+            viz_actor_spawn(&v->actors[slot], &v->rng,
+                            g == 0 ? VIZ_ACTOR_EXTRA : VIZ_ACTOR_SPARK, g,
+                            VIZ_ONSET_GROUPS, rise[g]);
+            v->actor_cool[g] = ACTOR_COOL;
+        }
+        if (tick_rise > TICK_TRIGGER && v->actor_cool[VIZ_ONSET_GROUPS] <= 0.0f) {
+            slot = viz_actor_slot(v->actors, VIZ_ACTORS);
+            if (slot >= 0) {
+                viz_actor_spawn(&v->actors[slot], &v->rng, VIZ_ACTOR_SPARK,
+                                VIZ_ONSET_GROUPS - 1, VIZ_ONSET_GROUPS, v->tick);
+                v->actor_cool[VIZ_ONSET_GROUPS] = ACTOR_COOL_TICK;
+            }
+        }
+    }
+
+    /* Presence: a band's raw level, or the mids for a lead. Rate is music time:
+     * flux and kick push it, a steady tone or silence leaves it at zero. */
+    for (g = 0; g < VIZ_ONSET_GROUPS; ++g) {
+        const int from = g * nb / VIZ_ONSET_GROUPS;
+        const int to = (g + 1) * nb / VIZ_ONSET_GROUPS;
+
+        lvl[g] = viz_band_mean(v->bars, from, to);
+    }
+    rate = reduce_motion ? 0.0f : (v->flux + 0.5f * v->kick) * v->master;
+    for (a = 0; a < VIZ_ACTORS; ++a) {
+        VizActor *ac = &v->actors[a];
+
+        if (!ac->live)
+            continue;
+        presence = ac->kind == VIZ_ACTOR_LEAD ? v->mid_gate : lvl[ac->band];
+        if (reduce_motion)
+            presence = 0.0f;
+        viz_actor_step(ac, dt, rate, presence * v->master);
+    }
 }
 
 VizView *
@@ -256,7 +339,7 @@ viz_view_update(VizView *v, const VizSettings *s, float dt, int active,
         const float tick_rise = (!reduce_motion && v->tick > v->prev_tick)
                                     ? v->tick - v->prev_tick : 0.0f;
         float novelty, base[2], tgt[2];
-        int k;
+        int k, section_fired = 0;
 
         if (!v->avg_ready) {
             memcpy(v->spec_avg, v->cbars, (size_t)nb * sizeof v->cbars[0]);
@@ -280,6 +363,7 @@ viz_view_update(VizView *v, const VizSettings *s, float dt, int active,
             for (k = 0; k < 3; ++k)
                 v->phx_off[k] = (viz_rand01(&v->rng) * 2.0f - 1.0f) * PHX_OFF[k];
             v->novelty_cool = SECTION_COOLDOWN;
+            section_fired = 1;
         }
 
         viz_wander_step(v->wander, &v->rng,
@@ -309,6 +393,7 @@ viz_view_update(VizView *v, const VizSettings *s, float dt, int active,
             viz_outline(v->cbars, nb, v->outline, VIZ_OUTLINE_N);
             v->shape_depth += (depth_tgt - v->shape_depth) * d_ease;
         }
+        actors_update(v, dt, nb, section_fired, tick_rise, reduce_motion);
         v->prev_kick = v->kick;
         v->prev_tick = v->tick;
     }
@@ -377,7 +462,7 @@ fractal_render(VizView *v, const VizSettings *s)
     const float rot = v->rot;
     unsigned int any = 0;
     float cr, ci;
-    int x, y;
+    int x, y, a;
 
     /* Silence: the last frame was black and the level is gated to zero, so
      * there is nothing to draw and the texture already shows black. */
@@ -434,6 +519,28 @@ fractal_render(VizView *v, const VizSettings *s)
                 r += k * sr;
                 g += k * sg;
                 b += k * sb;
+            }
+            /* Actors: each live one is a soft disc of its own Julia set, lit by
+             * its envelope and the spectrum ring under the pixel. */
+            for (a = 0; a < VIZ_ACTORS; ++a) {
+                const VizActor *ac = &v->actors[a];
+                float dx, dy, d2, mask, ar, ag, ab;
+
+                if (!ac->live)
+                    continue;
+                dx = (u - ac->x) / ac->size;
+                dy = (w - ac->y) / ac->size;
+                d2 = dx * dx + dy * dy;
+                if (d2 >= 1.0f)
+                    continue;
+                mask = (1.0f - d2) * (1.0f - d2);
+                mu_rgb(viz_julia_mu(dx * 1.2f, dy * 1.2f, ac->cr, ac->ci,
+                                    FRACTAL_ITER),
+                       hue + ac->hue, &ar, &ag, &ab);
+                k = lum * ac->env * mask * (0.5f + 0.5f * ring);
+                r += k * ar;
+                g += k * ag;
+                b += k * ab;
             }
             r = fminf(r, 255.0f);
             g = fminf(g, 255.0f);

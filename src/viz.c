@@ -580,3 +580,114 @@ viz_julia_anchor(int idx, float *cr, float *ci)
     *cr = JULIA_ANCHOR[k][0];
     *ci = JULIA_ANCHOR[k][1];
 }
+
+/* Onset: a band's mean rise above its slow average, past a margin, scaled to
+ * 0..1. The margin keeps steady sound at zero. */
+#define ONSET_MARGIN 0.10f
+#define ONSET_GAIN   4.0f
+
+void
+viz_onset(const float *bars, const float *avg, int nbars, float *rise, int groups)
+{
+    int g;
+
+    for (g = 0; g < groups; ++g) {
+        const int from = g * nbars / groups, to = (g + 1) * nbars / groups;
+        const float cur = viz_band_mean(bars, from, to);
+        const float old = viz_band_mean(avg, from, to);
+        float e = (cur - old - ONSET_MARGIN) * ONSET_GAIN;
+
+        if (e < 0.0f)
+            e = 0.0f;
+        if (e > 1.0f)
+            e = 1.0f;
+        rise[g] = e;
+    }
+}
+
+int
+viz_actor_slot(const VizActor *a, int n)
+{
+    int i, best = -1;
+    float best_score = 0.0f;
+
+    if (n <= 0)
+        return -1;
+    for (i = 0; i < n; ++i)
+        if (!a[i].live)
+            return i;
+    /* Releasing actors score below 1, live ones above, so a fading actor goes
+     * first; within each group the dimmest is taken. */
+    for (i = 0; i < n; ++i) {
+        const float score = a[i].env + (a[i].releasing ? 0.0f : 1.0f);
+
+        if (best < 0 || score < best_score) {
+            best = i;
+            best_score = score;
+        }
+    }
+    return best;
+}
+
+void
+viz_actor_spawn(VizActor *a, unsigned int *rng, int kind, int band,
+                int bands, float strength)
+{
+    static const float size_base[3] = {0.55f, 0.30f, 0.12f};
+    static const float life_base[3] = {40.0f, 12.0f, 4.0f};
+    float f, s, jx, jy;
+    int idx;
+
+    if (kind < 0 || kind > 2)
+        kind = VIZ_ACTOR_EXTRA;
+    if (bands < 1)
+        bands = 1;
+    if (band < 0)
+        band = 0;
+    if (band >= bands)
+        band = bands - 1;
+    s = strength < 0.0f ? 0.0f : (strength > 1.0f ? 1.0f : strength);
+    /* Bass sits low on the stage with a low hue, treble high with a high hue. */
+    f = bands > 1 ? (float)band / (float)(bands - 1) : 0.0f;
+    jx = viz_rand01(rng) * 2.0f - 1.0f;
+    jy = viz_rand01(rng) * 2.0f - 1.0f;
+    idx = (band + (int)(viz_rand01(rng) * VIZ_JULIA_ANCHORS)) % VIZ_JULIA_ANCHORS;
+    viz_julia_anchor(idx, &a->cr, &a->ci);
+
+    a->kind = kind;
+    a->band = band;
+    a->x = jx * 0.7f;
+    a->y = (0.5f - f) * 0.8f + jy * 0.15f;
+    a->size = size_base[kind] * (0.8f + 0.4f * s);
+    a->hue = f * 0.6f;
+    a->life = life_base[kind] * (0.8f + 0.4f * viz_rand01(rng));
+    a->age = 0.0f;
+    a->env = 0.0f;
+    a->releasing = 0;
+    a->live = 1;
+}
+
+/* Attack and release times, and the presence below which a band has gone quiet. */
+#define ACTOR_ATTACK_S   0.4f
+#define ACTOR_RELEASE    2.0f  /* envelope decay per second while releasing */
+#define ACTOR_PRESENCE   0.05f
+
+void
+viz_actor_step(VizActor *a, float dt, float rate, float presence)
+{
+    if (!a->live)
+        return;
+    if (rate > 0.0f)
+        a->age += dt * rate;
+    if (presence < ACTOR_PRESENCE || a->age >= a->life)
+        a->releasing = 1;
+    if (a->releasing) {
+        a->env *= expf(-dt * ACTOR_RELEASE);
+        if (a->env < 0.01f) {
+            a->env = 0.0f;
+            a->live = 0;
+        }
+    } else {
+        a->env += (1.0f - a->env) * (1.0f - expf(-dt / ACTOR_ATTACK_S));
+    }
+}
