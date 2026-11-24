@@ -184,6 +184,24 @@ viz_fractal_c(float bass, float mid, float treble, float *cr, float *ci)
     *ci = 0.27f + 0.10f * mid - 0.05f * treble;
 }
 
+void
+viz_compress(float *dst, const float *src, int n, float exponent)
+{
+    int i;
+
+    for (i = 0; i < n; ++i) {
+        float x = src[i];
+
+        if (x <= 0.0f) {
+            dst[i] = 0.0f;
+            continue;
+        }
+        if (x > 1.0f)
+            x = 1.0f;
+        dst[i] = powf(x, exponent);
+    }
+}
+
 float
 viz_gate(float level, float floor)
 {
@@ -194,6 +212,25 @@ viz_gate(float level, float floor)
     if (t >= 1.0f)
         return 1.0f;
     return t * t * (3.0f - 2.0f * t);
+}
+
+float
+viz_band_mean(const float *bars, int from, int to)
+{
+    float sum = 0.0f;
+    int i;
+
+    if (to <= from)
+        return 0.0f;
+    for (i = from; i < to; ++i)
+        sum += bars[i];
+    return sum / (float)(to - from);
+}
+
+float
+viz_band_gate(const float *bars, int from, int to, float floor)
+{
+    return viz_gate(viz_band_mean(bars, from, to), floor);
 }
 
 float
@@ -336,4 +373,88 @@ viz_beat(float *avg, float *kick, float bass, float dt)
         *kick = excess;
     else
         *kick *= expf(-dt * 6.0f);
+}
+
+/* Wander tuning: each onset adds up to WANDER_IMPULSE of offset, and the
+ * offset loses about 1 - exp(-WANDER_SPRING * dt) of itself per frame. */
+#define WANDER_IMPULSE 0.25f
+#define WANDER_SPRING  0.5f
+
+unsigned int
+viz_rand_next(unsigned int *s)
+{
+    unsigned int x = *s ? *s : 1u;
+
+    x ^= x << 13;
+    x ^= x >> 17;
+    x ^= x << 5;
+    *s = x;
+    return x;
+}
+
+float
+viz_rand01(unsigned int *s)
+{
+    return (float)(viz_rand_next(s) >> 8) / 16777216.0f;
+}
+
+void
+viz_wander_step(float w[2], unsigned int *rng, float impulse, float dt)
+{
+    const float decay = expf(-WANDER_SPRING * dt);
+    float mag;
+
+    if (impulse > 0.0f) {
+        const float a = viz_rand01(rng) * 2.0f * PI_F;
+        const float k = impulse * WANDER_IMPULSE;
+
+        w[0] += k * cosf(a);
+        w[1] += k * sinf(a);
+    }
+    w[0] *= decay;
+    w[1] *= decay;
+
+    mag = sqrtf(w[0] * w[0] + w[1] * w[1]);
+    if (mag > VIZ_WANDER_MAX) {
+        const float s = VIZ_WANDER_MAX / mag;
+
+        w[0] *= s;
+        w[1] *= s;
+    }
+}
+
+float
+viz_novelty(const float *avg, const float *cur, int n)
+{
+    float sum = 0.0f;
+    int i;
+
+    if (n <= 0)
+        return 0.0f;
+    for (i = 0; i < n; ++i)
+        sum += fabsf(cur[i] - avg[i]);
+    return sum / (float)n;
+}
+
+/* Curated Julia constants: dendrite, rabbit, spiral, Siegel disc, seahorse
+ * and basilica. All have |c| <= 1.2 so they stay well inside the bounded set
+ * family the fractal's wander is tuned for. */
+static const float JULIA_ANCHOR[VIZ_JULIA_ANCHORS][2] = {
+    {0.00f, 1.00f},
+    {-0.123f, 0.745f},
+    {-0.80f, 0.156f},
+    {-0.391f, -0.587f},
+    {-0.75f, 0.11f},
+    {-1.00f, 0.00f},
+};
+
+void
+viz_julia_anchor(int idx, float *cr, float *ci)
+{
+    int k = idx % VIZ_JULIA_ANCHORS;
+
+    if (k < 0)
+        k += VIZ_JULIA_ANCHORS;
+    *cr = JULIA_ANCHOR[k][0];
+    *ci = JULIA_ANCHOR[k][1];
 }

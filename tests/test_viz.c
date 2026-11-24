@@ -92,6 +92,27 @@ main(void)
         CHECK(hi_s > lo_s, "higher smoothing releases more slowly");
     }
 
+    /* Compression: 0 and 1 are fixed points, quiet values are lifted,
+     * the curve is monotonic, and exponent 1 is the identity. */
+    {
+        float in[5] = { 0.0f, 0.2f, 0.5f, 0.8f, 1.0f };
+        float out[5], id[5];
+        int i;
+
+        viz_compress(out, in, 5, 0.7f);
+        CHECK(out[0] == 0.0f && fabsf(out[4] - 1.0f) < 1e-6f, "compress keeps 0 and 1");
+        CHECK(out[1] > in[1] + 0.05f, "compress lifts quiet values");
+        for (i = 1; i < 5; ++i)
+            CHECK(out[i] > out[i - 1], "compress is monotonic");
+        viz_compress(id, in, 5, 1.0f);
+        CHECK(fabsf(id[2] - 0.5f) < 1e-6f, "exponent 1 leaves values unchanged");
+        {
+            float over[1] = { 3.0f }, res[1];
+            viz_compress(res, over, 1, 0.7f);
+            CHECK(res[0] == 1.0f, "compress clamps input above 1");
+        }
+    }
+
     /* Settings clamp into range. */
     s.mode = 99;
     s.gain_pct = 1;
@@ -168,6 +189,23 @@ main(void)
         CHECK(mono, "gate is monotonic");
     }
 
+    /* Gate on raw bars: a 0.01 floor compresses to about 0.04, which would open
+     * a gate at 0.03, but the raw gate stays shut. Loud raw bars open it. */
+    {
+        float floor_bars[32], loud[32], comp[32];
+        int i;
+        for (i = 0; i < 32; ++i)
+            floor_bars[i] = 0.01f;
+        viz_compress(comp, floor_bars, 32, 0.7f);
+        CHECK(viz_band_mean(comp, 0, 32) > 0.03f, "compressed hiss clears the floor");
+        CHECK(viz_band_gate(floor_bars, 0, 32, 0.03f) == 0.0f, "raw hiss keeps the gate shut");
+        for (i = 0; i < 32; ++i)
+            loud[i] = 0.5f;
+        CHECK(viz_band_gate(loud, 0, 32, 0.03f) == 1.0f, "raw loud bars open the gate");
+        CHECK(fabsf(viz_band_mean(loud, 8, 16) - 0.5f) < 1e-6f, "band mean reads its range");
+        CHECK(viz_band_mean(loud, 4, 4) == 0.0f, "empty band mean is zero");
+    }
+
     /* Spectral flux: steady is 0, a rise is positive, a pure fall is 0. */
     {
         float a[VIZ_BARS_MAX], bb[VIZ_BARS_MAX];
@@ -223,6 +261,82 @@ main(void)
         for (i = 0; i < 60; ++i)
             viz_beat(&avg, &kick, 0.9f, 1.0f / 60.0f);
         CHECK(kick < 0.05f, "kick decays after a second");
+    }
+
+    /* Random state: never stuck at zero, always in 0..1, same seed same run. */
+    {
+        unsigned int a = 12345u, b = 12345u, z = 0u;
+        float r01;
+        int ok = 1, same = 1;
+
+        for (i = 0; i < 1000; ++i) {
+            r01 = viz_rand01(&a);
+            if (r01 < 0.0f || r01 >= 1.0f)
+                ok = 0;
+            if (r01 != viz_rand01(&b))
+                same = 0;
+        }
+        CHECK(ok, "rand01 stays in 0..1");
+        CHECK(same, "same seed gives the same sequence");
+        viz_rand_next(&z);
+        CHECK(z != 0u, "zero seed is repaired");
+    }
+
+    /* Wander: impulses never push it past the clamp, and it decays to rest. */
+    {
+        float w[2] = {0.0f, 0.0f};
+        unsigned int rng = 99u;
+        float mag, worst = 0.0f;
+
+        for (i = 0; i < 10000; ++i) {
+            viz_wander_step(w, &rng, 1.0f, 1.0f / 60.0f);
+            mag = sqrtf(w[0] * w[0] + w[1] * w[1]);
+            if (mag > worst)
+                worst = mag;
+        }
+        CHECK(worst <= VIZ_WANDER_MAX + 1e-5f, "wander stays within its clamp");
+        CHECK(worst > 0.0f, "impulses move the wander");
+        for (i = 0; i < 600; ++i)
+            viz_wander_step(w, &rng, 0.0f, 1.0f / 60.0f);
+        CHECK(sqrtf(w[0] * w[0] + w[1] * w[1]) < 0.01f, "wander decays to rest");
+    }
+
+    /* Novelty: zero for the same spectrum, and rising with the difference. */
+    {
+        float avg[16], near[16], far[16];
+
+        for (i = 0; i < 16; ++i) {
+            avg[i] = 0.4f;
+            near[i] = 0.4f;
+            far[i] = 0.9f;
+        }
+        CHECK(viz_novelty(avg, near, 16) == 0.0f, "novelty is zero for the same spectrum");
+        CHECK(viz_novelty(avg, far, 16) > 0.4f, "novelty rises with a change");
+        CHECK(viz_novelty(avg, far, 0) == 0.0f, "novelty of no bars is zero");
+    }
+
+    /* Anchors: every one sits inside |c| <= 1.2, and indices wrap. */
+    {
+        int idx;
+        int bounded = 1;
+
+        for (idx = 0; idx < VIZ_JULIA_ANCHORS; ++idx) {
+            float ar, ai;
+
+            viz_julia_anchor(idx, &ar, &ai);
+            if (sqrtf(ar * ar + ai * ai) > 1.2f)
+                bounded = 0;
+        }
+        CHECK(bounded, "julia anchors are bounded");
+        viz_julia_anchor(VIZ_JULIA_ANCHORS + 2, &cr, &ci);
+        {
+            float r2, i2;
+            viz_julia_anchor(2, &r2, &i2);
+            CHECK(cr == r2 && ci == i2, "anchor index wraps forward");
+            viz_julia_anchor(-1, &cr, &ci);
+            viz_julia_anchor(VIZ_JULIA_ANCHORS - 1, &r2, &i2);
+            CHECK(cr == r2 && ci == i2, "anchor index wraps backward");
+        }
     }
 
     if (failures) {

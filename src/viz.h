@@ -43,8 +43,19 @@ void viz_hue_rgb(float hue, unsigned char *r, unsigned char *g, unsigned char *b
  * treble energy in 0..1. No clock: a steady sound gives a steady shape. */
 void viz_fractal_c(float bass, float mid, float treble, float *cr, float *ci);
 
+/* Soft compression for the fractal: dst[i] = src[i]^exponent, with src clamped
+ * to 0..1. Monotonic, 0 -> 0 and 1 -> 1; exponent < 1 lifts quiet values more
+ * than loud ones. exponent 1.0 copies unchanged. */
+void viz_compress(float *dst, const float *src, int n, float exponent);
+
 /* Silence gate: 0 at or below floor, rising smoothly to 1 a quarter above it. */
 float viz_gate(float level, float floor);
+
+/* Mean of bars[from..to), or 0 for an empty range. */
+float viz_band_mean(const float *bars, int from, int to);
+
+/* viz_gate applied to the mean of bars[from..to). */
+float viz_band_gate(const float *bars, int from, int to, float floor);
 
 /* Spectral flux: mean positive rise per bar between two frames, scaled and
  * clamped to 0..1. Zero when the spectrum is steady or only falling. */
@@ -77,5 +88,25 @@ void viz_kaleido(float re, float im, int segs, float rot, float *ore, float *oim
 /* Beat tracker. avg is a slow bass average and kick a 0..1 envelope that jumps
  * on a bass onset and decays. Both are updated in place. Call once per frame. */
 void viz_beat(float *avg, float *kick, float bass, float dt);
+
+/* Xorshift32 random state. A zero state is replaced with 1, so any seed works.
+ * viz_rand_next returns the raw 32-bit value; viz_rand01 returns 0..1. */
+unsigned int viz_rand_next(unsigned int *s);
+float viz_rand01(unsigned int *s);
+
+/* Julia-constant wander: a 2D offset that jumps by a random direction scaled
+ * by impulse (0..1, e.g. a kick rise) and springs back to zero over time. The
+ * magnitude never exceeds VIZ_WANDER_MAX. Call once per frame. */
+#define VIZ_WANDER_MAX 0.20f
+void viz_wander_step(float w[2], unsigned int *rng, float impulse, float dt);
+
+/* Mean absolute difference between a slow average and the current spectrum,
+ * over n bars. Zero for identical spectra; grows as the sound changes. */
+float viz_novelty(const float *avg, const float *cur, int n);
+
+/* Number of curated Julia constants, and the one at idx (wrapped into range,
+ * so any int is valid). Every anchor stays inside |c| <= 1.2. */
+#define VIZ_JULIA_ANCHORS 6
+void viz_julia_anchor(int idx, float *cr, float *ci);
 
 #endif

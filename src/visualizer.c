@@ -21,6 +21,7 @@ static const char *const viz_mode_names[VIZ_MODE_COUNT] = {
 struct VizView {
     float target[VIZ_BARS_MAX]; /* this frame's raw bar heights, 0..1 */
     float bars[VIZ_BARS_MAX];   /* smoothed bar heights shown on screen */
+    float cbars[VIZ_BARS_MAX];  /* bars lifted for quiet music; the fractal reads these */
     float samples[VIZ_FFT_N];   /* newest mono samples, -1..1 */
     float pts[2 * VIZ_FFT_N];   /* waveform polyline, x/y pairs */
     unsigned int pixels[FRACTAL_W * FRACTAL_H];
@@ -30,6 +31,7 @@ struct VizView {
     float treble;               /* top-quarter band energy, 0..1 */
     float level;                /* mean of all bars, 0..1: overall loudness */
     float master;               /* silence-gated level, 0 in silence */
+    float mid_gate;             /* gated mid energy, 0..1: the Phoenix's presence */
     float centroid;             /* smoothed spectral centroid, 0..1 */
     float prev_bars[VIZ_BARS_MAX]; /* last frame's bars, for spectral flux */
     int primed;                 /* prev_bars holds a frame from this visible run */
@@ -40,9 +42,25 @@ struct VizView {
     float kick;                 /* beat envelope, 0..1, jumps on bass onsets */
     float trail_decay;          /* per-frame keep factor for fractal trails */
     float phx[3];               /* Phoenix shape now: c real, c imag, p */
+    float phx_off[3];           /* Phoenix offset, set at each section change */
+    float wander[2];            /* Julia constant offset, flung by kick onsets */
+    float ctr[2];               /* Julia centre, eases toward the current anchor */
+    int anchor;                 /* curated Julia anchor index, -1 = classic */
+    int segs;                   /* kaleidoscope wedge count, changes per section */
+    float spec_avg[VIZ_BARS_MAX]; /* slow average spectrum, for section changes */
+    int avg_ready;              /* spec_avg holds a real frame from this run */
+    float novelty_cool;         /* seconds until another section change may fire */
+    float prev_kick;            /* last frame's kick, to find onset rises */
+    unsigned int rng;           /* xorshift state for the music-driven choices */
     struct MpAnim mode_anim[VIZ_MODE_COUNT];
     struct MpAnim fs_anim;
 };
+
+/* Exponent for the fractal's soft compression: below 1 lifts quiet bands so
+ * soft passages show; 0.6 is stronger, 0.8 gentler. */
+#define VIZ_COMPRESS 0.7f
+/* Kaleidoscope wedges: the classic six, and the set a section change picks from. */
+#define KALEIDO_SEGS 6
 
 /* Phoenix resting parameters (c real, c imag, p): the classic silhouette. The
  * music pulls the shape away from it; with no music it is not drawn at all. */
@@ -50,6 +68,33 @@ static const float PHX_REST[3] = {0.56667f, 0.00f, -0.50f};
 /* Safe box the shape stays in, so it never collapses to blank or solid. */
 static const float PHX_LO[3] = {0.20f, -0.25f, -0.90f};
 static const float PHX_HI[3] = {0.65f,  0.25f,  0.10f};
+
+/* Music memory tuning. A section change is a spectrum that has drifted from its
+ * slow average by more than NOVELTY_THRESHOLD; sections are at least
+ * SECTION_COOLDOWN seconds apart. PHX_OFF bounds the Phoenix offset per section. */
+#define NOVELTY_THRESHOLD 0.15f
+#define SECTION_COOLDOWN  4.0f
+static const float PHX_OFF[3] = {0.12f, 0.10f, 0.08f};
+
+/* Puts the music memory back to the classic look. Used at creation and on
+ * reopen, so each visible run starts from the same picture. */
+static void
+motion_reset(VizView *v)
+{
+    float base[2];
+    int k;
+
+    viz_fractal_c(0.0f, 0.0f, 0.0f, &base[0], &base[1]);
+    v->ctr[0] = base[0];
+    v->ctr[1] = base[1];
+    v->anchor = -1;
+    v->segs = KALEIDO_SEGS;
+    v->wander[0] = v->wander[1] = 0.0f;
+    v->novelty_cool = 0.0f;
+    v->prev_kick = 0.0f;
+    for (k = 0; k < 3; ++k)
+        v->phx_off[k] = 0.0f;
+}
 
 VizView *
 viz_view_create(SDL_Renderer *ren)
@@ -70,6 +115,11 @@ viz_view_create(SDL_Renderer *ren)
     for (i = 0; i < 3; ++i)
         v->phx[i] = PHX_REST[i];
     v->trail_decay = 1.0f;
+    /* Seeded from the clock and the allocation, so each launch differs. */
+    v->rng = ((unsigned int)SDL_GetTicks() * 2654435761u) ^ (unsigned int)(size_t)v;
+    if (!v->rng)
+        v->rng = 1u;
+    motion_reset(v);
     return v;
 }
 
@@ -96,6 +146,8 @@ viz_view_update(VizView *v, const VizSettings *s, float dt, int active,
         /* Forget the spectrum and flux so reopening the tab starts clean. */
         v->primed = 0;
         v->flux = 0.0f;
+        v->avg_ready = 0;
+        motion_reset(v);
         return;
     }
 
@@ -103,41 +155,49 @@ viz_view_update(VizView *v, const VizSettings *s, float dt, int active,
     viz_spectrum(v->samples, VIZ_FFT_N, v->target, nb,
                  (float)s->gain_pct / 100.0f);
     viz_smooth(v->bars, v->target, nb, (float)s->smooth_pct / 100.0f);
+    /* The fractal works from the compressed copy, so quiet bands register. */
+    viz_compress(v->cbars, v->bars, nb, VIZ_COMPRESS);
 
     /* Bass and mid are the mean of the lower quarter and the next quarter of
      * the bars, which are log-spaced, so they follow low and mid frequencies. */
     q = nb / 4;
     h = nb / 2;
     for (i = 0; i < q; ++i)
-        sum_bass += v->bars[i];
+        sum_bass += v->cbars[i];
     for (i = q; i < h; ++i)
-        sum_mid += v->bars[i];
+        sum_mid += v->cbars[i];
     v->bass = q ? sum_bass / (float)q : 0.0f;
     v->mid = (h > q) ? sum_mid / (float)(h - q) : 0.0f;
 
     /* Treble is the top quarter of the bars. */
     for (i = nb - q; i < nb; ++i)
-        sum_treble += v->bars[i];
+        sum_treble += v->cbars[i];
     v->treble = q ? sum_treble / (float)q : 0.0f;
-    viz_beat(&v->bass_avg, &v->kick, v->bass, dt);
+    /* The beat tracker and the silence gates read the raw bars: their
+     * thresholds were tuned on raw values, and compression would lift hiss
+     * over the floor. */
+    viz_beat(&v->bass_avg, &v->kick, viz_band_mean(v->bars, 0, q), dt);
 
     /* Overall loudness, gated: below the noise floor the picture is exactly
      * black, so silence and pause leave no shape and no movement. */
     for (i = 0; i < nb; ++i)
-        sum_all += v->bars[i];
+        sum_all += v->cbars[i];
     v->level = nb ? sum_all / (float)nb : 0.0f;
-    v->master = viz_gate(v->level, 0.03f);
+    v->master = viz_band_gate(v->bars, 0, nb, 0.03f);
+    v->mid_gate = viz_band_gate(v->bars, q, h, 0.03f);
 
     /* Spectral flux: how much the spectrum is rising right now. A steady tone
      * gives zero, so the kaleidoscope stops; each new note turns it. The
-     * envelope lets a rise ring out briefly rather than cutting off. */
-    flux_now = v->primed ? viz_flux(v->prev_bars, v->bars, nb) : 0.0f;
-    memcpy(v->prev_bars, v->bars, (size_t)nb * sizeof v->bars[0]);
+     * envelope lets a rise ring out briefly rather than cutting off. Gated by
+     * master so silence holds the picture still. */
+    flux_now = v->primed ? viz_flux(v->prev_bars, v->cbars, nb) : 0.0f;
+    flux_now *= v->master;
+    memcpy(v->prev_bars, v->cbars, (size_t)nb * sizeof v->cbars[0]);
     v->primed = 1;
     v->flux = flux_now > v->flux ? flux_now : v->flux * expf(-dt * 6.0f);
 
     /* Centroid is smoothed so the hue glides instead of flickering. */
-    centre = viz_centroid(v->bars, nb);
+    centre = viz_centroid(v->cbars, nb);
     rise_k = 1.0f - expf(-dt * 2.0f);
     v->centroid += (centre - v->centroid) * rise_k;
 
@@ -159,6 +219,60 @@ viz_view_update(VizView *v, const VizSettings *s, float dt, int active,
             v->rot -= TAU_F;
     }
 
+    /* Music memory. Kick onsets fling the Julia constant (wander). A section
+     * change, where the spectrum drifts from its slow average, picks a new
+     * curated anchor, wedge count and Phoenix offset. All of it is gated by the
+     * master level and off under reduce_motion, so silence and reduced motion
+     * hold the picture still. */
+    {
+        static const int segs_choice[4] = {4, 5, 6, 8};
+        const float ka = 1.0f - expf(-dt * 0.25f);  /* about a 4 s average */
+        const float glide = 1.0f - expf(-dt * 0.5f); /* about a 2 s centre glide */
+        const float kick_rise = (!reduce_motion && v->kick > v->prev_kick)
+                                    ? v->kick - v->prev_kick : 0.0f;
+        float novelty, base[2], tgt[2];
+        int k;
+
+        if (!v->avg_ready) {
+            memcpy(v->spec_avg, v->cbars, (size_t)nb * sizeof v->cbars[0]);
+            v->avg_ready = 1;
+        }
+        novelty = viz_novelty(v->spec_avg, v->cbars, nb) * v->master;
+        for (i = 0; i < nb; ++i)
+            v->spec_avg[i] += (v->cbars[i] - v->spec_avg[i]) * ka;
+
+        v->novelty_cool -= dt;
+        if (!reduce_motion && novelty > NOVELTY_THRESHOLD
+            && v->novelty_cool <= 0.0f) {
+            /* Always move: a random step of 1..N-1 from the current anchor. */
+            if (v->anchor < 0)
+                v->anchor = (int)(viz_rand01(&v->rng) * VIZ_JULIA_ANCHORS)
+                            % VIZ_JULIA_ANCHORS;
+            else
+                v->anchor = (v->anchor + 1 + (int)(viz_rand01(&v->rng)
+                                * (VIZ_JULIA_ANCHORS - 1))) % VIZ_JULIA_ANCHORS;
+            v->segs = segs_choice[(int)(viz_rand01(&v->rng) * 4.0f) % 4];
+            for (k = 0; k < 3; ++k)
+                v->phx_off[k] = (viz_rand01(&v->rng) * 2.0f - 1.0f) * PHX_OFF[k];
+            v->novelty_cool = SECTION_COOLDOWN;
+        }
+
+        viz_wander_step(v->wander, &v->rng, kick_rise * v->master, dt);
+
+        /* The centre glides to the anchor, or to the classic centre when there
+         * is none. The music still moves the shape around that centre. */
+        viz_fractal_c(0.0f, 0.0f, 0.0f, &base[0], &base[1]);
+        if (v->anchor >= 0)
+            viz_julia_anchor(v->anchor, &tgt[0], &tgt[1]);
+        else {
+            tgt[0] = base[0];
+            tgt[1] = base[1];
+        }
+        for (k = 0; k < 2; ++k)
+            v->ctr[k] += (tgt[k] - v->ctr[k]) * glide;
+        v->prev_kick = v->kick;
+    }
+
     /* Phoenix shape: pulled from its resting silhouette by the mids and the
      * treble, and eased so changes morph rather than snap. */
     {
@@ -169,7 +283,7 @@ viz_view_update(VizView *v, const VizSettings *s, float dt, int active,
         int k;
 
         for (k = 0; k < 3; ++k) {
-            float tgt = PHX_REST[k] + nudge[k];
+            float tgt = PHX_REST[k] + nudge[k] + v->phx_off[k];
 
             tgt = tgt < PHX_LO[k] ? PHX_LO[k] : (tgt > PHX_HI[k] ? PHX_HI[k] : tgt);
             v->phx[k] += (tgt - v->phx[k]) * ease;
@@ -183,7 +297,6 @@ viz_view_update(VizView *v, const VizSettings *s, float dt, int active,
  * brightness from the spectrum, bass at the centre and treble at the rim. The
  * Phoenix creature sits on top, present only while the mids are. Brightness
  * follows the gated level, and each frame keeps a fading copy of the last. */
-#define KALEIDO_SEGS 6
 #define PHX_HALF     1.6f     /* half-height of the Phoenix view */
 #define RIPPLE_AMP    0.04f
 
@@ -220,7 +333,7 @@ fractal_render(VizView *v, const VizSettings *s)
     const float phx_half = PHX_HALF * (1.0f - 0.3f * v->level);
     /* The creature's presence is the mids, so it appears with vocals and solos
      * and is absent in a held silence. */
-    const float phx_on = lum * viz_gate(v->mid, 0.03f);
+    const float phx_on = lum * v->mid_gate;
     const float rot = v->rot;
     unsigned int any = 0;
     float cr, ci;
@@ -231,7 +344,16 @@ fractal_render(VizView *v, const VizSettings *s)
     if (v->master <= 0.0f && v->dark)
         return;
 
-    viz_fractal_c(v->bass, v->mid, v->treble, &cr, &ci);
+    /* The Julia constant: the music's offset from the classic centre, added to
+     * the eased centre (which tracks the anchor) plus the kick wander. */
+    {
+        float bcr, bci;
+
+        viz_fractal_c(v->bass, v->mid, v->treble, &cr, &ci);
+        viz_fractal_c(0.0f, 0.0f, 0.0f, &bcr, &bci);
+        cr = v->ctr[0] + (cr - bcr) + v->wander[0];
+        ci = v->ctr[1] + (ci - bci) + v->wander[1];
+    }
 
     for (y = 0; y < FRACTAL_H; ++y) {
         const float w = ((float)y / FRACTAL_H - 0.5f) * 2.0f;
@@ -245,13 +367,13 @@ fractal_render(VizView *v, const VizSettings *s)
             const float rim = im + amp * sinf(re * 7.0f - rot * 1.5f);
             /* Ring: centre is bass, rim is treble. Each ring glows with the bar
              * its radius maps to, so the picture is the spectrum laid out. */
-            const float ring = v->bars[viz_ring_bin(
+            const float ring = v->cbars[viz_ring_bin(
                 sqrtf(u * u + w * w) * 0.70710678f, s->bars)];
             const size_t idx = (size_t)y * FRACTAL_W + (size_t)x;
             float fre, fim, r, g, b, sr, sg, sb, pr, pg, pb, k;
             unsigned int prev;
 
-            viz_kaleido(rre, rim, KALEIDO_SEGS, rot, &fre, &fim);
+            viz_kaleido(rre, rim, v->segs, rot, &fre, &fim);
             mu_rgb(viz_julia_mu(fre, fim, cr, ci, FRACTAL_ITER), hue,
                    &r, &g, &b);
             k = lum * ring;
