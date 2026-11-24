@@ -58,6 +58,8 @@ struct VizView {
     float shape_depth;          /* outline depth, follows the level and kicks */
     VizActor actors[VIZ_ACTORS];                /* the cast on the fractal stage */
     float actor_cool[VIZ_ONSET_GROUPS + 1];     /* spawn cooldowns per band; last is clicks */
+    float actor_t;              /* wall time the shimmer runs on, frozen under reduce motion */
+    int actor_still;            /* reduce motion: shimmer off, actors hold their brightness */
     unsigned int rng;           /* xorshift state for the music-driven choices */
     struct MpAnim mode_anim[VIZ_MODE_COUNT];
     struct MpAnim fs_anim;
@@ -112,13 +114,13 @@ motion_reset(VizView *v)
     v->shape_depth = 0.0f;
     memset(v->actors, 0, sizeof v->actors);
     memset(v->actor_cool, 0, sizeof v->actor_cool);
+    v->actor_t = 0.0f;
     for (k = 0; k < 3; ++k)
         v->phx_off[k] = 0.0f;
 }
 
-/* Actor cooldowns: a band may spawn again after ACTOR_COOL seconds, clicks
- * after ACTOR_COOL_TICK. A rise must clear the trigger to count as a new sound. */
-#define ACTOR_COOL      1.5f
+/* Actor cooldowns: a band may spawn again after viz_actor_cooldown seconds,
+ * clicks after ACTOR_COOL_TICK. A rise must clear the trigger to count as a new sound. */
 #define ACTOR_COOL_TICK 0.6f
 #define ONSET_TRIGGER   0.3f
 #define TICK_TRIGGER    0.3f
@@ -133,11 +135,12 @@ actors_update(VizView *v, float dt, int nb, int section_fired,
 {
     float rise[VIZ_ONSET_GROUPS], lvl[VIZ_ONSET_GROUPS];
     float rate, presence;
-    int g, a, slot;
+    int g, a, n, slot;
 
     for (g = 0; g <= VIZ_ONSET_GROUPS; ++g)
         if (v->actor_cool[g] > 0.0f)
             v->actor_cool[g] -= dt;
+    v->actor_t += dt;
 
     if (section_fired) {
         for (a = 0; a < VIZ_ACTORS; ++a)
@@ -156,13 +159,16 @@ actors_update(VizView *v, float dt, int nb, int section_fired,
         for (g = 0; g < VIZ_ONSET_GROUPS; ++g) {
             if (rise[g] < ONSET_TRIGGER || v->actor_cool[g] > 0.0f)
                 continue;
-            slot = viz_actor_slot(v->actors, VIZ_ACTORS);
-            if (slot < 0)
-                break;
-            viz_actor_spawn(&v->actors[slot], &v->rng,
-                            g == 0 ? VIZ_ACTOR_EXTRA : VIZ_ACTOR_SPARK, g,
-                            VIZ_ONSET_GROUPS, rise[g]);
-            v->actor_cool[g] = ACTOR_COOL;
+            /* Higher bands bring more actors per onset, and sooner again. */
+            for (n = viz_actor_count(g, VIZ_ONSET_GROUPS); n > 0; --n) {
+                slot = viz_actor_slot(v->actors, VIZ_ACTORS);
+                if (slot < 0)
+                    break;
+                viz_actor_spawn(&v->actors[slot], &v->rng,
+                                g == 0 ? VIZ_ACTOR_EXTRA : VIZ_ACTOR_SPARK, g,
+                                VIZ_ONSET_GROUPS, rise[g]);
+            }
+            v->actor_cool[g] = viz_actor_cooldown(g, VIZ_ONSET_GROUPS);
         }
         if (tick_rise > TICK_TRIGGER && v->actor_cool[VIZ_ONSET_GROUPS] <= 0.0f) {
             slot = viz_actor_slot(v->actors, VIZ_ACTORS);
@@ -250,6 +256,7 @@ viz_view_update(VizView *v, const VizSettings *s, float dt, int active,
         return;
     }
 
+    v->actor_still = reduce_motion ? 1 : 0;
     playback_get_samples(v->samples, VIZ_FFT_N);
     viz_spectrum(v->samples, VIZ_FFT_N, v->target, nb,
                  (float)s->gain_pct / 100.0f);
@@ -461,8 +468,13 @@ fractal_render(VizView *v, const VizSettings *s)
     const float phx_on = lum * v->mid_gate;
     const float rot = v->rot;
     unsigned int any = 0;
-    float cr, ci;
+    float cr, ci, tmul[VIZ_ACTORS];
     int x, y, a;
+
+    /* Each actor's shimmer for this frame, once rather than per pixel. */
+    for (a = 0; a < VIZ_ACTORS; ++a)
+        tmul[a] = v->actor_still ? 1.0f
+                                 : viz_actor_twinkle(&v->actors[a], v->actor_t);
 
     /* Silence: the last frame was black and the level is gated to zero, so
      * there is nothing to draw and the texture already shows black. */
@@ -537,7 +549,7 @@ fractal_render(VizView *v, const VizSettings *s)
                 mu_rgb(viz_julia_mu(dx * 1.2f, dy * 1.2f, ac->cr, ac->ci,
                                     FRACTAL_ITER),
                        hue + ac->hue, &ar, &ag, &ab);
-                k = lum * ac->env * mask * (0.5f + 0.5f * ring);
+                k = lum * ac->env * ac->bright * tmul[a] * mask * (0.5f + 0.5f * ring);
                 r += k * ar;
                 g += k * ag;
                 b += k * ab;

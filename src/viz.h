@@ -131,7 +131,7 @@ void viz_julia_anchor(int idx, float *cr, float *ci);
 /* Actors: small Julia blobs on the fractal stage. Each is born from a sound
  * that rises above its band's slow average (viz_onset), then ages with the
  * music (viz_actor_step), so a held tone holds the cast and silence clears it. */
-#define VIZ_ACTORS        6
+#define VIZ_ACTORS        24
 #define VIZ_ONSET_GROUPS  6
 typedef enum { VIZ_ACTOR_LEAD = 0, VIZ_ACTOR_EXTRA = 1, VIZ_ACTOR_SPARK = 2 } VizActorKind;
 
@@ -141,8 +141,12 @@ typedef struct {
     int band;          /* onset group that spawned it, 0 bass .. groups-1 treble */
     float cr, ci;      /* Julia constant, a curated anchor */
     float x, y;        /* centre on the stage, in the fractal's -1..1 units */
-    float size;        /* radius on the stage, same units */
+    float size;        /* radius on the stage, same units; smaller for treble */
     float hue;         /* hue offset from the view's hue */
+    float bright;      /* brightness multiplier: dim bass, over-bright treble */
+    float shimmer;     /* twinkle depth 0..1: only the top bands really flicker */
+    float tw;          /* twinkle rate, radians per second of wall time */
+    float tph;         /* twinkle phase, radians */
     float age;         /* music time lived, advanced by rate */
     float life;        /* music time to live before it releases */
     float env;         /* brightness envelope, 0..1 */
@@ -154,14 +158,28 @@ typedef struct {
 void viz_onset(const float *bars, const float *avg, int nbars, float *rise, int groups);
 
 /* Slot to use for a new actor among n: a free one, else the dimmest releasing
- * one, else the dimmest overall. Returns -1 when n is zero. */
+ * one, else the dimmest overall, with sparks given up before extras and leads.
+ * Returns -1 when n is zero. */
 int viz_actor_slot(const VizActor *a, int n);
 
 /* Starts actor a of the given kind (VizActorKind) from onset band of bands,
- * with strength 0..1 setting its size. Position, size, hue and constant follow
- * the band, with seeded jitter from rng. */
+ * with strength 0..1 setting its size. Position, constant and hue follow the
+ * band, with seeded jitter from rng. The band also sets the look: treble is
+ * smaller, brighter, shimmers more and lives shorter than bass. */
 void viz_actor_spawn(VizActor *a, unsigned int *rng, int kind, int band,
                      int bands, float strength);
+
+/* How many actors one onset in band brings on: one for bass, up to four in the
+ * top band. Never falls as the band rises. */
+int viz_actor_count(int band, int bands);
+
+/* Seconds before the same band may spawn again: slow for bass, quick for
+ * treble. Never rises as the band rises. */
+float viz_actor_cooldown(int band, int bands);
+
+/* Brightness multiplier 0..1 for a shimmering actor at wall time t: 1 when it
+ * does not shimmer, else a flicker whose depth is its shimmer. */
+float viz_actor_twinkle(const VizActor *a, float t);
 
 /* Advances a live actor by dt seconds. Its music-time age advances by dt*rate,
  * so rate 0 holds it still. presence is its band energy 0..1: when it drops,

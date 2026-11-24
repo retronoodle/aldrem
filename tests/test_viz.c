@@ -561,6 +561,84 @@ main(void)
         }
         CHECK(hue_ok, "bass actors take a lower hue than treble actors");
 
+        /* Pitch look: treble is smaller, brighter, shimmers more and lives
+         * shorter than bass, all from the same kind and strength. */
+        {
+            VizActor lo, hi;
+            unsigned int r6 = 31337u;
+            int look_ok;
+
+            viz_actor_spawn(&lo, &r6, VIZ_ACTOR_SPARK, 0, VIZ_ONSET_GROUPS, 0.5f);
+            viz_actor_spawn(&hi, &r6, VIZ_ACTOR_SPARK, VIZ_ONSET_GROUPS - 1,
+                            VIZ_ONSET_GROUPS, 0.5f);
+            look_ok = hi.size < lo.size && hi.bright > lo.bright
+                   && hi.shimmer > lo.shimmer && hi.life < lo.life
+                   && lo.shimmer == 0.0f;
+            CHECK(look_ok, "treble actors are smaller, brighter, shimmer more and live shorter");
+        }
+
+        /* Quantity and cadence: more per onset and sooner again as the band rises. */
+        {
+            int g, count_ok = 1, cool_ok = 1;
+            int prev_count = 0;
+            float prev_cool = 1e9f;
+
+            for (g = 0; g < VIZ_ONSET_GROUPS; ++g) {
+                const int c = viz_actor_count(g, VIZ_ONSET_GROUPS);
+                const float cd = viz_actor_cooldown(g, VIZ_ONSET_GROUPS);
+
+                if (c < prev_count || c < 1)
+                    count_ok = 0;
+                if (cd > prev_cool || cd <= 0.0f)
+                    cool_ok = 0;
+                prev_count = c;
+                prev_cool = cd;
+            }
+            CHECK(viz_actor_count(0, VIZ_ONSET_GROUPS) == 1 && count_ok,
+                  "bass brings one actor and higher bands bring more");
+            CHECK(cool_ok, "higher bands may spawn again sooner");
+        }
+
+        /* Shimmer: no shimmer means no flicker; otherwise it stays in 0..1. */
+        {
+            VizActor still, flick;
+            unsigned int r7 = 555u;
+            int tw_ok = 1, t;
+
+            viz_actor_spawn(&still, &r7, VIZ_ACTOR_EXTRA, 0, VIZ_ONSET_GROUPS, 0.5f);
+            viz_actor_spawn(&flick, &r7, VIZ_ACTOR_SPARK, VIZ_ONSET_GROUPS - 1,
+                            VIZ_ONSET_GROUPS, 0.5f);
+            for (t = 0; t < 400; ++t) {
+                const float m = viz_actor_twinkle(&flick, t * 0.05f);
+
+                if (!isfinite(m) || m < 0.0f || m > 1.0f)
+                    tw_ok = 0;
+                if (viz_actor_twinkle(&still, t * 0.05f) != 1.0f)
+                    tw_ok = 0;
+            }
+            CHECK(tw_ok, "twinkle stays in 0..1 and only shimmering actors flicker");
+        }
+
+        /* Eviction: with every slot live and equally bright, a spark goes first. */
+        {
+            VizActor full[VIZ_ACTORS];
+            unsigned int r8 = 8u;
+            int i, evict_ok;
+
+            for (i = 0; i < VIZ_ACTORS; ++i) {
+                const int kind = i % 3;
+
+                viz_actor_spawn(&full[i], &r8, kind, 2, VIZ_ONSET_GROUPS, 0.5f);
+                full[i].env = 0.5f;
+            }
+            /* Slot 2 is a spark; slot 0 is a lead, slot 1 an extra. */
+            full[0].kind = VIZ_ACTOR_LEAD;
+            full[1].kind = VIZ_ACTOR_EXTRA;
+            full[2].kind = VIZ_ACTOR_SPARK;
+            evict_ok = viz_actor_slot(full, VIZ_ACTORS) == 2;
+            CHECK(evict_ok, "with all slots live, a spark is replaced before an extra or lead");
+        }
+
         /* Ageing: holds on rate 0, releases when presence drops, dies after the
          * fade, and never goes non-finite. */
         {

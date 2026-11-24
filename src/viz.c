@@ -617,9 +617,11 @@ viz_actor_slot(const VizActor *a, int n)
         if (!a[i].live)
             return i;
     /* Releasing actors score below 1, live ones above, so a fading actor goes
-     * first; within each group the dimmest is taken. */
+     * first; within each group the dimmest is taken. A spark scores lowest of
+     * its kind, so the leads and extras are the last to be taken. */
     for (i = 0; i < n; ++i) {
-        const float score = a[i].env + (a[i].releasing ? 0.0f : 1.0f);
+        const float score = a[i].env + (a[i].releasing ? 0.0f : 1.0f)
+                          + 0.25f * (float)(VIZ_ACTOR_SPARK - a[i].kind);
 
         if (best < 0 || score < best_score) {
             best = i;
@@ -658,13 +660,46 @@ viz_actor_spawn(VizActor *a, unsigned int *rng, int kind, int band,
     a->band = band;
     a->x = jx * 0.7f;
     a->y = (0.5f - f) * 0.8f + jy * 0.15f;
-    a->size = size_base[kind] * (0.8f + 0.4f * s);
+    /* Pitch sets the look: treble is a third the size, brighter, shimmers
+     * more, and lives a little shorter than bass. */
+    a->size = size_base[kind] * (1.0f - 0.65f * f) * (0.8f + 0.4f * s);
     a->hue = f * 0.6f;
-    a->life = life_base[kind] * (0.8f + 0.4f * viz_rand01(rng));
+    a->bright = 0.45f + 1.15f * f;
+    a->shimmer = f * f;
+    a->tw = 6.0f + 10.0f * viz_rand01(rng);
+    a->tph = viz_rand01(rng) * 2.0f * PI_F;
+    a->life = life_base[kind] * (1.0f - 0.3f * f) * (0.8f + 0.4f * viz_rand01(rng));
     a->age = 0.0f;
     a->env = 0.0f;
     a->releasing = 0;
     a->live = 1;
+}
+
+int
+viz_actor_count(int band, int bands)
+{
+    const float f = bands > 1 ? (float)band / (float)(bands - 1) : 0.0f;
+
+    return 1 + (int)(3.0f * f + 0.5f);
+}
+
+float
+viz_actor_cooldown(int band, int bands)
+{
+    const float f = bands > 1 ? (float)band / (float)(bands - 1) : 0.0f;
+
+    return 1.5f + (0.4f - 1.5f) * f;
+}
+
+float
+viz_actor_twinkle(const VizActor *a, float t)
+{
+    float m;
+
+    if (a->shimmer <= 0.0f)
+        return 1.0f;
+    m = 1.0f - a->shimmer * (0.5f - 0.5f * sinf(t * a->tw + a->tph));
+    return m < 0.0f ? 0.0f : (m > 1.0f ? 1.0f : m);
 }
 
 /* Attack and release times, and the presence below which a band has gone quiet. */
