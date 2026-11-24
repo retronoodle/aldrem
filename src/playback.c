@@ -73,6 +73,10 @@ struct Playback {
      * int16 so the UI can read it without a lock or a data race; viz_write is
      * the monotonic count of samples the callback has produced. */
     SDL_atomic_t viz_ring[VIZ_RING];
+    /* Left and right taps for stereo placement, written in step with viz_ring
+     * (mono input duplicates into both). */
+    SDL_atomic_t viz_ring_l[VIZ_RING];
+    SDL_atomic_t viz_ring_r[VIZ_RING];
     SDL_atomic_t viz_write;
 
     float *ring;              /* RB_FRAMES frames, have.channels interleaved */
@@ -224,6 +228,16 @@ audio_callback(void *userdata, Uint8 *stream, int len)
                     m = -1.0f;
                 SDL_AtomicSet(&p->viz_ring[((Uint32)vw + (Uint32)f) & (VIZ_RING - 1)],
                               (int)(m * VIZ_SCALE));
+            }
+            /* Per-side taps, same index as viz_ring. */
+            for (f = 0; f < n; ++f) {
+                const int idx = ((Uint32)vw + (Uint32)f) & (VIZ_RING - 1);
+                float l = dst[f * ch];
+                float r = dst[f * ch + (ch > 1 ? 1 : 0)];
+                if (l > 1.0f) l = 1.0f; else if (l < -1.0f) l = -1.0f;
+                if (r > 1.0f) r = 1.0f; else if (r < -1.0f) r = -1.0f;
+                SDL_AtomicSet(&p->viz_ring_l[idx], (int)(l * VIZ_SCALE));
+                SDL_AtomicSet(&p->viz_ring_r[idx], (int)(r * VIZ_SCALE));
             }
             SDL_AtomicSet(&p->viz_write, (int)((Uint32)vw + (Uint32)n));
         }
@@ -751,6 +765,33 @@ playback_get_samples(float *out, int n)
     for (i = 0; i < n; ++i) {
         const int idx = (int)((Uint32)vw - (Uint32)n + (Uint32)i) & (VIZ_RING - 1);
         out[i] = (float)SDL_AtomicGet(&g.viz_ring[idx]) / VIZ_SCALE;
+    }
+    return n;
+}
+
+int
+playback_get_samples_lr(float *l, float *r, int n)
+{
+    int vw, i;
+
+    if (!l || !r || n <= 0)
+        return 0;
+    if (n > VIZ_RING)
+        n = VIZ_RING;
+
+    if (!g.inited || SDL_AtomicGet(&g.state) != MP_PLAYING) {
+        for (i = 0; i < n; ++i) {
+            l[i] = 0.0f;
+            r[i] = 0.0f;
+        }
+        return n;
+    }
+
+    vw = SDL_AtomicGet(&g.viz_write);
+    for (i = 0; i < n; ++i) {
+        const int idx = (int)((Uint32)vw - (Uint32)n + (Uint32)i) & (VIZ_RING - 1);
+        l[i] = (float)SDL_AtomicGet(&g.viz_ring_l[idx]) / VIZ_SCALE;
+        r[i] = (float)SDL_AtomicGet(&g.viz_ring_r[idx]) / VIZ_SCALE;
     }
     return n;
 }

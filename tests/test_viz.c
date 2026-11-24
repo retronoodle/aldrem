@@ -488,6 +488,65 @@ main(void)
         CHECK(small_ok, "a rise below the margin is ignored");
     }
 
+    /* Stereo balance: a band's side decides its pan, silence centres. */
+    {
+        float left[16], right[16], pan[VIZ_ONSET_GROUPS];
+        int k, ok = 1, bounded = 1, mono_ok = 1, quiet_ok = 1;
+        float x_prev = -2.0f;
+
+        for (k = 0; k < 16; ++k)
+            left[k] = right[k] = 0.0f;
+        viz_pan(left, right, 16, pan, VIZ_ONSET_GROUPS);
+        for (k = 0; k < VIZ_ONSET_GROUPS; ++k)
+            if (pan[k] != 0.0f)
+                quiet_ok = 0;
+        CHECK(quiet_ok, "silence centres every band");
+
+        for (k = 0; k < 16; ++k) {
+            left[k] = 0.6f;
+            right[k] = 0.0f;
+        }
+        viz_pan(left, right, 16, pan, VIZ_ONSET_GROUPS);
+        for (k = 0; k < VIZ_ONSET_GROUPS; ++k)
+            if (pan[k] > -0.99f)
+                ok = 0;
+        CHECK(ok, "left-only sound pans fully left");
+
+        for (k = 0; k < 16; ++k) {
+            left[k] = 0.0f;
+            right[k] = 0.6f;
+        }
+        viz_pan(left, right, 16, pan, VIZ_ONSET_GROUPS);
+        ok = 1;
+        for (k = 0; k < VIZ_ONSET_GROUPS; ++k)
+            if (pan[k] < 0.99f)
+                ok = 0;
+        CHECK(ok, "right-only sound pans fully right");
+
+        for (k = 0; k < 16; ++k)
+            left[k] = right[k] = 0.4f;
+        viz_pan(left, right, 16, pan, VIZ_ONSET_GROUPS);
+        for (k = 0; k < VIZ_ONSET_GROUPS; ++k)
+            if (pan[k] != 0.0f)
+                mono_ok = 0;
+        CHECK(mono_ok, "equal sides centre");
+
+        /* Stage x follows the balance and stays on the stage. */
+        {
+            float p;
+            for (p = -1.0f; p <= 1.0f; p += 0.25f) {
+                float x = viz_pan_to_x(p, 0.0f);
+                if (x < x_prev)
+                    bounded = 0;
+                if (x < -0.71f || x > 0.71f)
+                    bounded = 0;
+                x_prev = x;
+            }
+            CHECK(bounded, "pan maps monotonically within the stage");
+            CHECK(viz_pan_to_x(1.0f, 1.0f) <= 0.71f, "pan with jitter stays on stage");
+        }
+    }
+
     /* Actors: slots, spawn placement and ageing. */
     {
         VizActor pool[VIZ_ACTORS];
