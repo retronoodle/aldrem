@@ -14,6 +14,14 @@
 #define FRACTAL_ITER 40
 #define TAU_F        6.28318530718f
 
+/* Stereo nudges. Each is small, so mono music looks as it did before. */
+#define SIDE_LUM     0.3f   /* how much a side's pan brightens its half of the Julia layer */
+#define SIDE_HUE     0.08f  /* hue shift across the width of a wide mix */
+#define PHX_PAN      0.25f  /* how far the Phoenix leans toward the mids' side */
+#define WANDER_PAN   0.02f  /* how far a kick flings the constant toward the bass's side */
+#define ROT_PAN      0.15f  /* how much a side's pan speeds up or slows the kaleidoscope */
+#define ACTOR_HUE_PAN 0.08f /* hue shift an actor takes from its side */
+
 static const char *const viz_mode_names[VIZ_MODE_COUNT] = {
     "Spectrum", "Wave", "Fractal", "Stereo", "Scope"
 };
@@ -34,6 +42,16 @@ struct VizView {
     float cbars_l[VIZ_BARS_MAX]; /* left bars lifted for quiet music, for the fractal shape */
     float cbars_r[VIZ_BARS_MAX]; /* right bars lifted for quiet music */
     float width;                /* eased stereo width, 0 mono .. 1 wide */
+    float spec_avg_l[VIZ_BARS_MAX]; /* slow average of each side, for onsets and sections */
+    float spec_avg_r[VIZ_BARS_MAX];
+    float prev_bars_l[VIZ_BARS_MAX]; /* last frame of each side, for flux */
+    float prev_bars_r[VIZ_BARS_MAX];
+    float pan_s;                /* eased overall balance, drives the fractal's side effects */
+    float pan_mid_s;            /* eased balance of the mid bands, leans the Phoenix */
+    float ripple_l;             /* treble of each side, for the per-side ripple */
+    float ripple_r;
+    float tick_m, tick_l, tick_r;   /* click detector states: mono, left, right */
+    float tick_avg_l, tick_avg_r;   /* their slow averages */
     float pts[2 * VIZ_FFT_N];   /* waveform polyline, x/y pairs */
     unsigned int pixels[FRACTAL_W * FRACTAL_H];
     SDL_Texture *fractal;       /* streaming texture, NULL if unavailable */
@@ -153,6 +171,8 @@ actor_place(VizView *v, VizActor *a, float pan)
 {
     a->jit = actor_jitter(v);
     a->x = viz_pan_to_x(pan, a->jit, v->width);
+    /* Warm on the left, cool on the right, like the fractal's colour shift. */
+    a->hue += ACTOR_HUE_PAN * pan;
 }
 
 /* An actor's x only moves while its sound is above this, so a lull holds it. */
@@ -166,7 +186,8 @@ static void
 actors_update(VizView *v, float dt, int nb, int section_fired,
               float tick_rise, int reduce_motion)
 {
-    float rise[VIZ_ONSET_GROUPS], lvl[VIZ_ONSET_GROUPS];
+    float rise[VIZ_ONSET_GROUPS], rise_l[VIZ_ONSET_GROUPS], rise_r[VIZ_ONSET_GROUPS];
+    float lvl[VIZ_ONSET_GROUPS];
     float rate, presence;
     int g, a, n, slot;
 
@@ -191,6 +212,16 @@ actors_update(VizView *v, float dt, int nb, int section_fired,
 
     if (!reduce_motion && v->master > 0.0f) {
         viz_onset(v->cbars, v->spec_avg, nb, rise, VIZ_ONSET_GROUPS);
+        /* A new sound on either side counts at full strength. The actor's pan
+         * still comes from the band's balance, so it lands on the side that fired. */
+        viz_onset(v->cbars_l, v->spec_avg_l, nb, rise_l, VIZ_ONSET_GROUPS);
+        viz_onset(v->cbars_r, v->spec_avg_r, nb, rise_r, VIZ_ONSET_GROUPS);
+        for (g = 0; g < VIZ_ONSET_GROUPS; ++g) {
+            if (rise_l[g] > rise[g])
+                rise[g] = rise_l[g];
+            if (rise_r[g] > rise[g])
+                rise[g] = rise_r[g];
+        }
         for (g = 0; g < VIZ_ONSET_GROUPS; ++g) {
             if (rise[g] < ONSET_TRIGGER || v->actor_cool[g] > 0.0f)
                 continue;
@@ -211,7 +242,9 @@ actors_update(VizView *v, float dt, int nb, int section_fired,
             if (slot >= 0) {
                 viz_actor_spawn(&v->actors[slot], &v->rng, VIZ_ACTOR_SPARK,
                                 VIZ_ONSET_GROUPS - 1, VIZ_ONSET_GROUPS, v->tick);
-                actor_place(v, &v->actors[slot], v->pan[VIZ_ONSET_GROUPS - 1]);
+                /* A click lands on the side it came from. */
+                actor_place(v, &v->actors[slot],
+                            viz_balance(v->tick_l, v->tick_r));
                 v->actor_cool[VIZ_ONSET_GROUPS] = ACTOR_COOL_TICK;
             }
         }
@@ -313,6 +346,15 @@ viz_view_update(VizView *v, const VizSettings *s, float dt, int active,
                  (float)s->gain_pct / 100.0f);
     viz_pan(v->target_l, v->target_r, nb, v->pan, VIZ_ONSET_GROUPS);
     viz_pan(v->target_l, v->target_r, nb, &v->pan_all, 1);
+    {
+        /* Eased balance for the fractal's side effects; reduce motion holds centre. */
+        const float ease = 1.0f - expf(-dt * 2.0f);
+        const float tgt = reduce_motion ? 0.0f : v->pan_all;
+        const float tgt_mid = reduce_motion ? 0.0f
+                                            : 0.5f * (v->pan[2] + v->pan[3]);
+        v->pan_s += (tgt - v->pan_s) * ease;
+        v->pan_mid_s += (tgt_mid - v->pan_mid_s) * ease;
+    }
     viz_smooth(v->bars, v->target, nb, (float)s->smooth_pct / 100.0f);
     viz_smooth(v->bars_l, v->target_l, nb, (float)s->smooth_pct / 100.0f);
     viz_smooth(v->bars_r, v->target_r, nb, (float)s->smooth_pct / 100.0f);
@@ -341,14 +383,33 @@ viz_view_update(VizView *v, const VizSettings *s, float dt, int active,
     for (i = nb - q; i < nb; ++i)
         sum_treble += v->cbars[i];
     v->treble = q ? sum_treble / (float)q : 0.0f;
+    {
+        /* The same top quarter, per side, so each half ripples on its own treble. */
+        float tl = 0.0f, tr = 0.0f;
+
+        for (i = nb - q; i < nb; ++i) {
+            tl += v->cbars_l[i];
+            tr += v->cbars_r[i];
+        }
+        v->ripple_l = q ? tl / (float)q : 0.0f;
+        v->ripple_r = q ? tr / (float)q : 0.0f;
+    }
     /* The beat tracker and the silence gates read the raw bars: their
      * thresholds were tuned on raw values, and compression would lift hiss
      * over the floor. */
     viz_beat(&v->bass_avg, &v->kick, viz_band_mean(v->bars, 0, q), dt);
     /* Clicks are too brief for the bars, so they get their own detector on
      * the raw samples. */
+    /* Each side is tested too, so a click on one side fires even when the
+     * mono mix barely moves. The mono detector's own state is kept apart from
+     * v->tick, which is the value everything else reads. */
     viz_tick(v->samples, VIZ_FFT_N, (float)s->gain_pct / 100.0f,
-             &v->tick_avg, &v->tick, dt);
+             &v->tick_avg, &v->tick_m, dt);
+    viz_tick(v->samples_l, VIZ_FFT_N, (float)s->gain_pct / 100.0f,
+             &v->tick_avg_l, &v->tick_l, dt);
+    viz_tick(v->samples_r, VIZ_FFT_N, (float)s->gain_pct / 100.0f,
+             &v->tick_avg_r, &v->tick_r, dt);
+    v->tick = fmaxf(v->tick_m, fmaxf(v->tick_l, v->tick_r));
 
     /* Overall loudness, gated: below the noise floor the picture is exactly
      * black, so silence and pause leave no shape and no movement. */
@@ -362,9 +423,21 @@ viz_view_update(VizView *v, const VizSettings *s, float dt, int active,
      * gives zero, so the kaleidoscope stops; each new note turns it. The
      * envelope lets a rise ring out briefly rather than cutting off. Gated by
      * master so silence holds the picture still. */
+    /* Flux is the largest of the mono and per-side rises, so a sound that
+     * only lives on one side still turns the kaleidoscope. */
     flux_now = v->primed ? viz_flux(v->prev_bars, v->cbars, nb) : 0.0f;
+    if (v->primed) {
+        const float fl = viz_flux(v->prev_bars_l, v->cbars_l, nb);
+        const float fr = viz_flux(v->prev_bars_r, v->cbars_r, nb);
+        if (fl > flux_now)
+            flux_now = fl;
+        if (fr > flux_now)
+            flux_now = fr;
+    }
     flux_now *= v->master;
     memcpy(v->prev_bars, v->cbars, (size_t)nb * sizeof v->cbars[0]);
+    memcpy(v->prev_bars_l, v->cbars_l, (size_t)nb * sizeof v->cbars_l[0]);
+    memcpy(v->prev_bars_r, v->cbars_r, (size_t)nb * sizeof v->cbars_r[0]);
     v->primed = 1;
     v->flux = flux_now > v->flux ? flux_now : v->flux * expf(-dt * 6.0f);
 
@@ -381,13 +454,19 @@ viz_view_update(VizView *v, const VizSettings *s, float dt, int active,
     if (reduce_motion) {
         v->kick = 0.0f;
         v->tick = 0.0f;
+        v->tick_l = 0.0f;
+        v->tick_r = 0.0f;
         v->flux = 0.0f;
         v->ripple = 0.0f;
+        v->ripple_l = 0.0f;
+        v->ripple_r = 0.0f;
     } else {
         v->ripple = v->treble;
         /* Rotation only ever advances on flux; wrapped to one turn so float
-         * precision holds over long sessions (2*pi is a symmetry of the fold). */
-        v->rot += v->flux * dt * 1.5f;
+         * precision holds over long sessions (2*pi is a symmetry of the fold).
+         * A right-heavy mix turns it a little faster, a left-heavy one slower,
+         * and the factor stays positive, so it never reverses. */
+        v->rot += v->flux * dt * 1.5f * (1.0f + ROT_PAN * v->pan_s);
         if (v->rot > TAU_F)
             v->rot -= TAU_F;
     }
@@ -412,11 +491,27 @@ viz_view_update(VizView *v, const VizSettings *s, float dt, int active,
 
         if (!v->avg_ready) {
             memcpy(v->spec_avg, v->cbars, (size_t)nb * sizeof v->cbars[0]);
+            memcpy(v->spec_avg_l, v->cbars_l, (size_t)nb * sizeof v->cbars_l[0]);
+            memcpy(v->spec_avg_r, v->cbars_r, (size_t)nb * sizeof v->cbars_r[0]);
             v->avg_ready = 1;
         }
-        novelty = viz_novelty(v->spec_avg, v->cbars, nb) * v->master;
-        for (i = 0; i < nb; ++i)
+        /* A section change can come from either side, so the novelty is the
+         * largest of the three comparisons. */
+        novelty = viz_novelty(v->spec_avg, v->cbars, nb);
+        {
+            const float nl = viz_novelty(v->spec_avg_l, v->cbars_l, nb);
+            const float nr = viz_novelty(v->spec_avg_r, v->cbars_r, nb);
+            if (nl > novelty)
+                novelty = nl;
+            if (nr > novelty)
+                novelty = nr;
+        }
+        novelty *= v->master;
+        for (i = 0; i < nb; ++i) {
             v->spec_avg[i] += (v->cbars[i] - v->spec_avg[i]) * ka;
+            v->spec_avg_l[i] += (v->cbars_l[i] - v->spec_avg_l[i]) * ka;
+            v->spec_avg_r[i] += (v->cbars_r[i] - v->spec_avg_r[i]) * ka;
+        }
 
         v->novelty_cool -= dt;
         if (!reduce_motion && novelty > NOVELTY_THRESHOLD
@@ -435,8 +530,13 @@ viz_view_update(VizView *v, const VizSettings *s, float dt, int active,
             section_fired = 1;
         }
 
-        viz_wander_step(v->wander, &v->rng,
-                        fminf(1.0f, kick_rise * v->master + tick_rise), dt);
+        {
+            const float strength = fminf(1.0f, kick_rise * v->master + tick_rise);
+
+            viz_wander_step(v->wander, &v->rng, strength, dt);
+            /* A kick also leans the constant toward the bass's side. */
+            v->wander[0] += WANDER_PAN * v->pan[0] * strength;
+        }
 
         /* The centre glides to the anchor, or to the classic centre when there
          * is none. The music still moves the shape around that centre. */
@@ -522,7 +622,8 @@ fractal_render(VizView *v, const VizSettings *s)
      * other) on top of the user's offset. No time term, so no drift. */
     const float hue = (float)s->hue_pct / 100.0f + 0.6f * v->centroid;
     /* Brightness: the gated level, with a short punch on each bass onset. */
-    const float lum = v->master * (1.0f + 0.5f * v->kick) + TICK_LUM * v->tick;
+    const float lum_base = v->master * (1.0f + 0.5f * v->kick);
+    const float lum = lum_base + TICK_LUM * v->tick;
     /* Louder pushes in; a bass onset punches in briefly. */
     const float zoom = (1.5f - 0.6f * v->level) * (1.0f - 0.2f * v->kick);
     const float phx_half = PHX_HALF * (1.0f - 0.3f * v->level);
@@ -562,7 +663,9 @@ fractal_render(VizView *v, const VizSettings *s)
             const float u = ((float)x / FRACTAL_W - 0.5f) * 2.0f;
             const float re = u * zoom * aspect;
             const float im = w * zoom;
-            const float amp = RIPPLE_AMP * v->ripple * zoom;
+            /* Ripple reads each side's treble, so a left note ripples the left. */
+            const float amp = RIPPLE_AMP * zoom
+                              * viz_side_lerp(v->ripple_l, v->ripple_r, u);
             const float rre = re + amp * sinf(im * 9.0f + rot * 2.0f);
             const float rim = im + amp * sinf(re * 7.0f - rot * 1.5f);
             /* Ring: centre is bass, rim is treble. Each ring glows with the bar
@@ -579,15 +682,25 @@ fractal_render(VizView *v, const VizSettings *s)
             unsigned int prev;
 
             viz_kaleido(rre, rim, v->segs, rot, &fre, &fim);
-            mu_rgb(viz_julia_mu(fre, fim, cr, ci, FRACTAL_ITER), hue,
-                   &r, &g, &b);
-            k = lum * ring;
+            /* The click flash and the side brightness follow the sound's side:
+             * a left click flashes the left, a right-heavy mix brightens the
+             * right. The colour leans warm on the left and cool on the right in
+             * a wide mix. Mono has none of these, so it looks as it did. */
+            {
+                const float lum_px = lum_base
+                    + TICK_LUM * viz_side_lerp(v->tick_l, v->tick_r, u);
+
+                mu_rgb(viz_julia_mu(fre, fim, cr, ci, FRACTAL_ITER),
+                       hue + SIDE_HUE * u * v->width, &r, &g, &b);
+                k = lum_px * ring * viz_side_mult(u, v->pan_s, SIDE_LUM);
+            }
             r *= k;
             g *= k;
             b *= k;
 
             if (phx_on > 0.01f) {
-                mu_rgb(viz_phoenix_mu(u * phx_half * aspect, w * phx_half,
+                mu_rgb(viz_phoenix_mu((u - PHX_PAN * v->pan_mid_s) * phx_half * aspect,
+                                      w * phx_half,
                                       v->phx[0], v->phx[1], v->phx[2],
                                       FRACTAL_ITER),
                        hue + 0.5f, &sr, &sg, &sb);
@@ -656,27 +769,61 @@ draw_spectrum(struct nk_command_buffer *c, const struct MpTheme *th,
 
     for (i = 0; i < nb; ++i) {
         /* A click lifts every bar to a low floor, drawn only here, so the
-         * bars the gates and fractal read are unchanged. */
-        float h = fmaxf(v->bars[i], TICK_BAR * v->tick) * hmax, tt, tri;
+         * bars the gates and fractal read are unchanged. Each bar is split
+         * into a left and a right half, so a stereo mix shows its imbalance;
+         * mono has equal halves and is drawn as one bar. */
+        float hl = fmaxf(v->bars_l[i], TICK_BAR * v->tick) * hmax;
+        float hr = fmaxf(v->bars_r[i], TICK_BAR * v->tick) * hmax, tt, tri;
+        float bx;
+        struct nk_color col;
 
-        if (h < 1.0f)
-            h = 1.0f;
+        if (hl < 1.0f)
+            hl = 1.0f;
+        if (hr < 1.0f)
+            hr = 1.0f;
         /* A triangle wave over the gradient keeps the colours continuous
          * across the bar that wraps around. */
         tt = (float)i / (float)nb + (float)s->hue_pct / 100.0f;
         tt -= floorf(tt);
         tri = tt < 0.5f ? 2.0f * tt : 2.0f - 2.0f * tt;
-        nk_fill_rect(c, nk_rect(x0 + i * slot + (slot - bw) * 0.5f,
-                                bottom - h, bw, h),
-                     0.0f, mp_col_lerp(th->accent_a, th->accent_b, tri));
+        col = mp_col_lerp(th->accent_a, th->accent_b, tri);
+        bx = x0 + i * slot + (slot - bw) * 0.5f;
+        if (hl == hr) {
+            nk_fill_rect(c, nk_rect(bx, bottom - hl, bw, hl), 0.0f, col);
+        } else {
+            nk_fill_rect(c, nk_rect(bx, bottom - hl, bw * 0.5f, hl), 0.0f, col);
+            nk_fill_rect(c, nk_rect(bx + bw * 0.5f, bottom - hr, bw * 0.5f, hr),
+                         0.0f, col);
+        }
     }
+}
+
+/* One waveform trace from src, drawn in col. */
+static void
+wave_trace(struct nk_command_buffer *c, VizView *v, const float *src, int n,
+           struct nk_rect r, float gain, float mid, float amp, struct nk_color col)
+{
+    int i;
+
+    for (i = 0; i < n; ++i) {
+        const int idx = i * (VIZ_FFT_N - 1) / (n - 1);
+        float s_val = src[idx] * gain;
+
+        if (s_val > 1.0f)
+            s_val = 1.0f;
+        else if (s_val < -1.0f)
+            s_val = -1.0f;
+        v->pts[2 * i] = r.x + (float)i * (r.w - 1.0f) / (float)(n - 1);
+        v->pts[2 * i + 1] = mid - s_val * amp;
+    }
+    nk_stroke_polyline(c, v->pts, n, 2.0f, col);
 }
 
 static void
 draw_wave(struct nk_command_buffer *c, const struct MpTheme *th,
           VizView *v, const VizSettings *s, struct nk_rect r)
 {
-    int n = (int)r.w, i;
+    int n = (int)r.w;
     const float mid = r.y + r.h * 0.5f;
     const float amp = r.h * 0.42f;
     const float gain = (float)s->gain_pct / 100.0f;
@@ -687,18 +834,10 @@ draw_wave(struct nk_command_buffer *c, const struct MpTheme *th,
         return;
 
     nk_stroke_line(c, r.x, mid, r.x + r.w, mid, 1.0f, th->border);
-    for (i = 0; i < n; ++i) {
-        const int idx = i * (VIZ_FFT_N - 1) / (n - 1);
-        float s_val = v->samples[idx] * gain;
-
-        if (s_val > 1.0f)
-            s_val = 1.0f;
-        else if (s_val < -1.0f)
-            s_val = -1.0f;
-        v->pts[2 * i] = r.x + (float)i * (r.w - 1.0f) / (float)(n - 1);
-        v->pts[2 * i + 1] = mid - s_val * amp;
-    }
-    nk_stroke_polyline(c, v->pts, n, 2.0f, th->accent_a);
+    /* Right first, then left over it: a mono mix shows only the left colour,
+     * and a stereo mix shows the right colour wherever the sides differ. */
+    wave_trace(c, v, v->samples_r, n, r, gain, mid, amp, th->accent_b);
+    wave_trace(c, v, v->samples_l, n, r, gain, mid, amp, th->accent_a);
 }
 
 /* Stereo: the left channel's bars grow to the left of centre, the right's to

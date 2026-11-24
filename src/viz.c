@@ -659,6 +659,21 @@ viz_onset(const float *bars, const float *avg, int nbars, float *rise, int group
 /* Below this combined band level a band counts as silent and centres. */
 #define PAN_FLOOR 0.02f
 
+float
+viz_balance(float l, float r)
+{
+    const float sum = l + r;
+    float p = 0.0f;
+
+    if (sum > PAN_FLOOR)
+        p = (r - l) / sum;
+    if (p < -1.0f)
+        p = -1.0f;
+    else if (p > 1.0f)
+        p = 1.0f;
+    return p;
+}
+
 void
 viz_pan(const float *bars_l, const float *bars_r, int nbars, float *pan, int groups)
 {
@@ -666,19 +681,37 @@ viz_pan(const float *bars_l, const float *bars_r, int nbars, float *pan, int gro
 
     for (g = 0; g < groups; ++g) {
         const int from = g * nbars / groups, to = (g + 1) * nbars / groups;
-        const float l = viz_band_mean(bars_l, from, to);
-        const float r = viz_band_mean(bars_r, from, to);
-        const float sum = l + r;
-        float p = 0.0f;
-
-        if (sum > PAN_FLOOR)
-            p = (r - l) / sum;
-        if (p < -1.0f)
-            p = -1.0f;
-        else if (p > 1.0f)
-            p = 1.0f;
-        pan[g] = p;
+        pan[g] = viz_balance(viz_band_mean(bars_l, from, to),
+                             viz_band_mean(bars_r, from, to));
     }
+}
+
+float
+viz_side_lerp(float left, float right, float u)
+{
+    /* u is -1 at the left edge, +1 at the right. Equal inputs return exactly
+     * that value, so a mono mix is unchanged. */
+    float t = (u + 1.0f) * 0.5f;
+
+    if (t < 0.0f)
+        t = 0.0f;
+    else if (t > 1.0f)
+        t = 1.0f;
+    return left + (right - left) * t;
+}
+
+/* Brightness on the stage: a right-heavy mix brightens the right edge, a
+ * left-heavy one the left, clamped so nothing blows out or vanishes. */
+float
+viz_side_mult(float u, float pan, float k)
+{
+    float m = 1.0f + k * pan * u;
+
+    if (m < 0.6f)
+        m = 0.6f;
+    else if (m > 1.4f)
+        m = 1.4f;
+    return m;
 }
 
 float

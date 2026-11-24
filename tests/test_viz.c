@@ -547,6 +547,43 @@ main(void)
         }
     }
 
+    /* Balance, side mixing and side brightness: the building blocks for stereo
+     * across the fractal. */
+    {
+        int ok = 1;
+        float p;
+
+        CHECK(viz_balance(0.0f, 0.0f) == 0.0f, "silent balance is centred");
+        CHECK(viz_balance(0.5f, 0.0f) == -1.0f, "left-only balance is -1");
+        CHECK(viz_balance(0.0f, 0.5f) == 1.0f, "right-only balance is +1");
+        CHECK(viz_balance(0.3f, 0.3f) == 0.0f, "equal sides balance to 0");
+        p = viz_balance(0.2f, 0.6f);
+        CHECK(p > 0.49f && p < 0.51f, "balance is (R-L)/(R+L)");
+
+        CHECK(viz_side_lerp(0.4f, 0.4f, -1.0f) == 0.4f
+              && viz_side_lerp(0.4f, 0.4f, 0.3f) == 0.4f,
+              "equal sides mix to that value exactly");
+        CHECK(viz_side_lerp(0.2f, 0.8f, -1.0f) == 0.2f
+              && viz_side_lerp(0.2f, 0.8f, 1.0f) == 0.8f
+              && fabsf(viz_side_lerp(0.2f, 0.8f, 0.0f) - 0.5f) < 1e-6f,
+              "side mix hits both edges and the centre");
+
+        CHECK(viz_side_mult(0.7f, 0.0f, 0.3f) == 1.0f, "no pan leaves brightness alone");
+        ok = 1;
+        for (p = -1.0f; p <= 1.0f; p += 0.25f) {
+            float u;
+            for (u = -1.0f; u <= 1.0f; u += 0.25f) {
+                const float m = viz_side_mult(u, p, 0.3f);
+                if (m < 0.6f || m > 1.4f)
+                    ok = 0;
+            }
+        }
+        CHECK(ok, "side brightness stays within 0.6..1.4");
+        CHECK(viz_side_mult(1.0f, 1.0f, 0.3f) > 1.0f
+              && viz_side_mult(-1.0f, 1.0f, 0.3f) < 1.0f,
+              "right-heavy mix brightens the right edge");
+    }
+
     /* Stereo width, actor drift, and the left/right background shape. */
     {
         float l[8], r[8], ol[VIZ_OUTLINE_N], orr[VIZ_OUTLINE_N], bl[16], br[16];
