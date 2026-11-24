@@ -2,6 +2,7 @@
 #include "visualizer.h"
 
 #include <math.h>
+#include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -32,14 +33,56 @@ struct VizView {
     float mid_avg;              /* slow mid average: what counts as a swell */
     float mid_env;              /* mid swell envelope: the entity's presence */
     float trail_decay;          /* per-frame keep factor for fractal trails */
+    float phx[3];               /* Phoenix shape now: c real, c imag, p */
+    int phx_preset;             /* PHX_PRESETS entry the shape is pulled to */
+    float phx_wf[3], phx_wp[3]; /* random wander rates and phases */
+    float phx_cool;             /* seconds before a kick may switch preset */
+    unsigned int phx_rng;       /* xorshift state: random start and jumps */
     struct MpAnim mode_anim[VIZ_MODE_COUNT];
     struct MpAnim fs_anim;
 };
+
+/* Phoenix parameter starting points (c real, c imag, p). Each one gives a
+ * different silhouette; the shape eases between them on kicks. */
+#define PHX_PRESET_N 6
+static const float PHX_PRESETS[PHX_PRESET_N][3] = {
+    {0.56667f,  0.00f, -0.50f}, /* classic Phoenix */
+    {0.40f,     0.10f, -0.60f},
+    {0.60f,    -0.12f, -0.45f},
+    {0.25f,     0.20f, -0.80f},
+    {0.50f,    -0.20f, -0.30f},
+    {0.35f,     0.00f, -0.85f},
+};
+/* Safe box the shape stays in, so it never collapses to blank or solid. */
+static const float PHX_LO[3] = {0.20f, -0.25f, -0.90f};
+static const float PHX_HI[3] = {0.65f,  0.25f,  0.10f};
+/* How far the random wander swings each parameter. */
+static const float PHX_WANDER[3] = {0.08f, 0.08f, 0.12f};
+
+static float
+phx_rand01(unsigned int *s)
+{
+    *s ^= *s << 13;
+    *s ^= *s >> 17;
+    *s ^= *s << 5;
+    return (float)(*s & 0xFFFFFFu) / 16777216.0f;
+}
+
+static int
+phx_pick(unsigned int *s, int avoid)
+{
+    int n = (int)(phx_rand01(s) * PHX_PRESET_N);
+
+    if (n >= PHX_PRESET_N)
+        n = PHX_PRESET_N - 1;
+    return (n == avoid) ? (n + 1) % PHX_PRESET_N : n;
+}
 
 VizView *
 viz_view_create(SDL_Renderer *ren)
 {
     VizView *v = calloc(1, sizeof *v);
+    int i;
 
     if (!v)
         return NULL;
@@ -49,6 +92,19 @@ viz_view_create(SDL_Renderer *ren)
                                        FRACTAL_W, FRACTAL_H);
         if (v->fractal)
             SDL_SetTextureScaleMode(v->fractal, SDL_ScaleModeLinear);
+    }
+
+    /* Every launch starts with a different creature: random seed, random
+     * preset, random wander rates. The state is set here, not eased from
+     * zero, so the first frame already shows a finished shape. */
+    v->phx_rng = ((unsigned int)SDL_GetTicks() * 2654435761u) ^ (unsigned int)(uintptr_t)v;
+    if (!v->phx_rng)
+        v->phx_rng = 0x9E3779B9u;
+    v->phx_preset = phx_pick(&v->phx_rng, -1);
+    for (i = 0; i < 3; ++i) {
+        v->phx_wf[i] = 0.10f + 0.20f * phx_rand01(&v->phx_rng);
+        v->phx_wp[i] = 6.2831853f * phx_rand01(&v->phx_rng);
+        v->phx[i] = PHX_PRESETS[v->phx_preset][i];
     }
     return v;
 }
@@ -119,15 +175,41 @@ viz_view_update(VizView *v, const VizSettings *s, float dt, int active,
         v->bass = v->mid = 0.0f;
         v->treble = v->kick = v->mid_env = 0.0f;
     }
+
+    /* Phoenix shape: a slow random wander around the current preset, nudged
+     * by the swell (mid_env) and the mids, with a kick jumping to a new
+     * preset. Everything eases, so changes morph rather than snap. Under
+     * reduce_motion the clock is frozen and the audio terms are zero, so the
+     * shape holds still. */
+    v->phx_cool = v->phx_cool > dt ? v->phx_cool - dt : 0.0f;
+    if (v->kick > 0.7f && v->phx_cool <= 0.0f) {
+        v->phx_preset = phx_pick(&v->phx_rng, v->phx_preset);
+        v->phx_cool = 1.5f;
+    }
+    {
+        const float ease = 1.0f - expf(-dt * 1.2f);
+        const float nudge[3] = {
+            0.06f * v->mid_env, 0.08f * v->mid, -0.15f * v->mid_env
+        };
+        int i;
+
+        for (i = 0; i < 3; ++i) {
+            const float base = PHX_PRESETS[v->phx_preset][i];
+            const float wander = PHX_WANDER[i] * sinf((float)v->t * v->phx_wf[i]
+                                                      + v->phx_wp[i]);
+            float tgt = base + wander + nudge[i];
+
+            tgt = tgt < PHX_LO[i] ? PHX_LO[i] : (tgt > PHX_HI[i] ? PHX_HI[i] : tgt);
+            v->phx[i] += (tgt - v->phx[i]) * ease;
+        }
+    }
 }
 
 /* Fractal look. The Julia layer is rippled by the treble and folded into a
  * kaleidoscope; a Phoenix creature sits on top, always present and reshaped by
  * the clock and the mids; each frame keeps a fading copy of the last one. */
 #define KALEIDO_SEGS 6
-#define PHX_CR        0.56667f /* Phoenix base constant */
-#define PHX_CI        0.0f
-#define PHX_HALF      1.6f     /* half-height of the Phoenix view */
+#define PHX_HALF     1.6f     /* half-height of the Phoenix view */
 #define HUE_DRIFT     0.02f /* palette turns per second */
 #define RIPPLE_AMP    0.04f
 
@@ -156,13 +238,9 @@ fractal_render(VizView *v, const VizSettings *s)
     const float aspect = (float)FRACTAL_W / (float)FRACTAL_H;
     const float t = (float)v->t;
     const float hue = (float)s->hue_pct / 100.0f + t * HUE_DRIFT;
-    /* The creature always lives on the clock, so it keeps morphing with no
-     * audio (paused, silence). Its memory term p reshapes it continuously;
-     * music pushes p further and brightens it. */
+    /* The creature's shape (c, p) is eased in viz_view_update, so it keeps
+     * morphing with no audio and reacts to swells and kicks. */
     const float breathe = 0.5f + 0.5f * sinf(t * 0.35f);
-    const float p = -0.5f + 0.25f * sinf(t * 0.37f) + 0.2f * v->mid_env;
-    const float phx_cr = PHX_CR + 0.05f * sinf(t * 0.23f) + 0.05f * v->mid_env;
-    const float phx_ci = PHX_CI + 0.08f * cosf(t * 0.31f);
     /* The view wanders across the plane, so the shape keeps changing. */
     const float phx_cx = 0.3f * sinf(t * 0.2f);
     const float phx_cy = 0.25f * cosf(t * 0.17f);
@@ -199,8 +277,9 @@ fractal_render(VizView *v, const VizSettings *s)
 
             if (mask > 0.01f) {
                 mu_rgb(viz_phoenix_mu(phx_cx + u * phx_half * aspect,
-                                      phx_cy + w * phx_half, phx_cr, phx_ci,
-                                      p, FRACTAL_ITER),
+                                      phx_cy + w * phx_half,
+                                      v->phx[0], v->phx[1], v->phx[2],
+                                      FRACTAL_ITER),
                        hue + 0.5f, &sr, &sg, &sb);
                 r += mask * sr;
                 g += mask * sg;
