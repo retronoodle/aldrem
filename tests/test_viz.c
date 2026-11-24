@@ -263,6 +263,61 @@ main(void)
         CHECK(kick < 0.05f, "kick decays after a second");
     }
 
+    /* Tick: a steady tone and quiet hiss leave no tick; a 1 ms click over a
+     * quiet bed registers, at the level whose bars only reach about 0.19; the
+     * tick decays; and an empty window is safe. */
+    {
+        float buf[N];
+        float avg = 0.0f, tick = 0.0f, tone_tick = 0.0f, hiss_tick = 0.0f;
+        unsigned int seed = 7u;
+        int f, j;
+
+        for (f = 0; f < 120; ++f) {
+            for (j = 0; j < N; ++j)
+                buf[j] = 0.3f * sinf(2.0f * 3.14159265f * 1000.0f * j / 44100.0f);
+            viz_tick(buf, N, 1.0f, &avg, &tone_tick, 1.0f / 60.0f);
+        }
+        CHECK(tone_tick < 0.05f, "a steady tone gives no tick");
+
+        avg = 0.0f;
+        for (f = 0; f < 120; ++f) {
+            for (j = 0; j < N; ++j)
+                buf[j] = 0.001f * (viz_rand01(&seed) * 2.0f - 1.0f);
+            viz_tick(buf, N, 1.0f, &avg, &hiss_tick, 1.0f / 60.0f);
+        }
+        CHECK(hiss_tick < 0.05f, "quiet hiss gives no tick");
+
+        avg = 0.0f;
+        for (f = 0; f < 120; ++f) {
+            for (j = 0; j < N; ++j)
+                buf[j] = 0.001f * (viz_rand01(&seed) * 2.0f - 1.0f);
+            viz_tick(buf, N, 1.0f, &avg, &tick, 1.0f / 60.0f);
+        }
+        for (j = 0; j < N; ++j)
+            buf[j] = (j >= 500 && j < 544) ? 0.05f * (j % 2 ? -1.0f : 1.0f)
+                                           : 0.001f * (viz_rand01(&seed) * 2.0f - 1.0f);
+        viz_tick(buf, N, 1.0f, &avg, &tick, 1.0f / 60.0f);
+        CHECK(tick > 0.5f, "a 1 ms click over a quiet bed gives a tick");
+        CHECK(tick <= 1.0f, "tick stays in 0..1");
+
+        for (f = 0; f < 60; ++f) {
+            for (j = 0; j < N; ++j)
+                buf[j] = 0.001f * (viz_rand01(&seed) * 2.0f - 1.0f);
+            viz_tick(buf, N, 1.0f, &avg, &tick, 1.0f / 60.0f);
+        }
+        CHECK(tick < 0.05f, "tick decays after a second");
+
+        viz_tick(buf, 0, 1.0f, &avg, &tick, 1.0f / 60.0f);
+        CHECK(tick >= 0.0f && tick <= 1.0f, "an empty window is safe");
+
+        avg = 0.0f;
+        tick = 0.0f;
+        for (j = 0; j < N; ++j)
+            buf[j] = (j >= 500 && j < 544) ? 1e-6f * (j % 2 ? -1.0f : 1.0f) : 0.0f;
+        viz_tick(buf, N, 1.0f, &avg, &tick, 1.0f / 60.0f);
+        CHECK(tick == 0.0f, "a click below the floor is ignored");
+    }
+
     /* Random state: never stuck at zero, always in 0..1, same seed same run. */
     {
         unsigned int a = 12345u, b = 12345u, z = 0u;

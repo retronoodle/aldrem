@@ -97,6 +97,12 @@ void viz_kaleido(float re, float im, int segs, float rot, float *ore, float *oim
  * on a bass onset and decays. Both are updated in place. Call once per frame. */
 void viz_beat(float *avg, float *kick, float bass, float dt);
 
+/* Transient (tick) detector for short clicks the bars average away. samples is
+ * the newest window of mono samples, gain the Gain slider as a fraction, avg a
+ * slow average of block energy and tick a 0..1 envelope. Both are updated in
+ * place. Call once per frame. */
+void viz_tick(const float *samples, int n, float gain, float *avg, float *tick, float dt);
+
 /* Xorshift32 random state. A zero state is replaced with 1, so any seed works.
  * viz_rand_next returns the raw 32-bit value; viz_rand01 returns 0..1. */
 unsigned int viz_rand_next(unsigned int *s);

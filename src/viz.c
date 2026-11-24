@@ -375,6 +375,65 @@ viz_beat(float *avg, float *kick, float bass, float dt)
         *kick *= expf(-dt * 6.0f);
 }
 
+/* Transient (tick) detector, on the raw samples. The FFT bars average a click
+ * away over a 23 ms window, so this looks at short blocks instead: the first
+ * difference removes bass, each block's mean energy is taken, and the loudest
+ * block is compared with the slow average of block energy. */
+#define TICK_BLOCK     32     /* samples per energy block, about 0.7 ms */
+#define TICK_FLOOR_DB  -70.0f /* block energy below this is hiss, ignored */
+#define TICK_ABOVE_DB  12.0f  /* how far over the average a block must be */
+#define TICK_RANGE_DB  12.0f  /* excess that maps to a full 1.0 */
+
+void
+viz_tick(const float *samples, int n, float gain, float *avg, float *tick, float dt)
+{
+    const float ka = 1.0f - expf(-dt * 2.0f);  /* about a 0.5 s average */
+    const float tick_ka = expf(-dt * 8.0f);
+    double block_acc = 0.0, sum = 0.0;
+    float peak = 0.0f, mean, peak_db, avg_db, excess;
+    int i, blocks = 0, count = 0;
+
+    for (i = 1; i < n; ++i) {
+        const float d = (samples[i] - samples[i - 1]) * gain;
+
+        block_acc += (double)d * (double)d;
+        if (++count == TICK_BLOCK) {
+            const float e = (float)(block_acc / TICK_BLOCK);
+
+            if (e > peak)
+                peak = e;
+            sum += e;
+            ++blocks;
+            block_acc = 0.0;
+            count = 0;
+        }
+    }
+    if (blocks == 0) {
+        *tick *= tick_ka;
+        return;
+    }
+    mean = (float)(sum / blocks);
+    if (*avg <= 0.0f)
+        *avg = mean;
+
+    peak_db = 10.0f * log10f(peak + 1e-12f);
+    avg_db = 10.0f * log10f(*avg + 1e-12f);
+    excess = peak_db - avg_db - TICK_ABOVE_DB;
+    if (peak_db < TICK_FLOOR_DB || excess < 0.0f)
+        excess = 0.0f;
+    if (excess > TICK_RANGE_DB)
+        excess = TICK_RANGE_DB;
+    excess /= TICK_RANGE_DB;
+
+    /* The average is updated after the test, so a click cannot raise its own
+     * threshold. */
+    *avg += (mean - *avg) * ka;
+    if (excess > *tick)
+        *tick = excess;
+    else
+        *tick *= tick_ka;
+}
+
 /* Wander tuning: each onset adds up to WANDER_IMPULSE of offset, and the
  * offset loses about 1 - exp(-WANDER_SPRING * dt) of itself per frame. */
 #define WANDER_IMPULSE 0.25f

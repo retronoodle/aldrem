@@ -51,6 +51,9 @@ struct VizView {
     int avg_ready;              /* spec_avg holds a real frame from this run */
     float novelty_cool;         /* seconds until another section change may fire */
     float prev_kick;            /* last frame's kick, to find onset rises */
+    float tick_avg;             /* slow average of block energy, for the tick detector */
+    float tick;                 /* transient envelope, 0..1, jumps on clicks */
+    float prev_tick;            /* last frame's tick, to find click rises */
     float shape_p;              /* ring superellipse exponent now, eases to target */
     float shape_p_tgt;          /* ring exponent picked at each section change */
     float shape_depth;          /* star-point depth, follows mids and kicks */
@@ -62,6 +65,10 @@ struct VizView {
 /* Exponent for the fractal's soft compression: below 1 lifts quiet bands so
  * soft passages show; 0.6 is stronger, 0.8 gentler. */
 #define VIZ_COMPRESS 0.7f
+/* Clicks: how much a tick lifts the fractal's brightness, and the floor a
+ * spectrum bar is lifted to by a tick. */
+#define TICK_LUM 0.6f
+#define TICK_BAR 0.35f
 /* Kaleidoscope wedges: the classic six, and the set a section change picks from. */
 #define KALEIDO_SEGS 6
 
@@ -97,6 +104,9 @@ motion_reset(VizView *v)
     v->wander[0] = v->wander[1] = 0.0f;
     v->novelty_cool = 0.0f;
     v->prev_kick = 0.0f;
+    v->tick_avg = 0.0f;
+    v->tick = 0.0f;
+    v->prev_tick = 0.0f;
     v->shape_p = 2.0f;
     v->shape_p_tgt = 2.0f;
     v->shape_depth = 0.0f;
@@ -185,6 +195,10 @@ viz_view_update(VizView *v, const VizSettings *s, float dt, int active,
      * thresholds were tuned on raw values, and compression would lift hiss
      * over the floor. */
     viz_beat(&v->bass_avg, &v->kick, viz_band_mean(v->bars, 0, q), dt);
+    /* Clicks are too brief for the bars, so they get their own detector on
+     * the raw samples. */
+    viz_tick(v->samples, VIZ_FFT_N, (float)s->gain_pct / 100.0f,
+             &v->tick_avg, &v->tick, dt);
 
     /* Overall loudness, gated: below the noise floor the picture is exactly
      * black, so silence and pause leave no shape and no movement. */
@@ -216,6 +230,7 @@ viz_view_update(VizView *v, const VizSettings *s, float dt, int active,
      * still follow the bands, but the kick, flux rotation and ripple are off. */
     if (reduce_motion) {
         v->kick = 0.0f;
+        v->tick = 0.0f;
         v->flux = 0.0f;
         v->ripple = 0.0f;
     } else {
@@ -239,6 +254,10 @@ viz_view_update(VizView *v, const VizSettings *s, float dt, int active,
         const float glide = 1.0f - expf(-dt * 0.5f); /* about a 2 s centre glide */
         const float kick_rise = (!reduce_motion && v->kick > v->prev_kick)
                                     ? v->kick - v->prev_kick : 0.0f;
+        /* A click flings the constant too, but not through the master gate:
+         * a click over near-silence still moves the picture. */
+        const float tick_rise = (!reduce_motion && v->tick > v->prev_tick)
+                                    ? v->tick - v->prev_tick : 0.0f;
         float novelty, base[2], tgt[2];
         int k;
 
@@ -267,7 +286,8 @@ viz_view_update(VizView *v, const VizSettings *s, float dt, int active,
             v->novelty_cool = SECTION_COOLDOWN;
         }
 
-        viz_wander_step(v->wander, &v->rng, kick_rise * v->master, dt);
+        viz_wander_step(v->wander, &v->rng,
+                        fminf(1.0f, kick_rise * v->master + tick_rise), dt);
 
         /* The centre glides to the anchor, or to the classic centre when there
          * is none. The music still moves the shape around that centre. */
@@ -296,6 +316,7 @@ viz_view_update(VizView *v, const VizSettings *s, float dt, int active,
             v->shape_depth += (depth_tgt - v->shape_depth) * d_ease;
         }
         v->prev_kick = v->kick;
+        v->prev_tick = v->tick;
     }
 
     /* Phoenix shape: pulled from its resting silhouette by the mids and the
@@ -352,7 +373,7 @@ fractal_render(VizView *v, const VizSettings *s)
      * other) on top of the user's offset. No time term, so no drift. */
     const float hue = (float)s->hue_pct / 100.0f + 0.6f * v->centroid;
     /* Brightness: the gated level, with a short punch on each bass onset. */
-    const float lum = v->master * (1.0f + 0.5f * v->kick);
+    const float lum = v->master * (1.0f + 0.5f * v->kick) + TICK_LUM * v->tick;
     /* Louder pushes in; a bass onset punches in briefly. */
     const float zoom = (1.5f - 0.6f * v->level) * (1.0f - 0.2f * v->kick);
     const float phx_half = PHX_HALF * (1.0f - 0.3f * v->level);
@@ -366,7 +387,7 @@ fractal_render(VizView *v, const VizSettings *s)
 
     /* Silence: the last frame was black and the level is gated to zero, so
      * there is nothing to draw and the texture already shows black. */
-    if (v->master <= 0.0f && v->dark)
+    if (v->master <= 0.0f && v->tick < 0.01f && v->dark)
         return;
 
     /* The Julia constant: the music's offset from the classic centre, added to
@@ -456,7 +477,9 @@ draw_spectrum(struct nk_command_buffer *c, const struct MpTheme *th,
     int i;
 
     for (i = 0; i < nb; ++i) {
-        float h = v->bars[i] * hmax, tt, tri;
+        /* A click lifts every bar to a low floor, drawn only here, so the
+         * bars the gates and fractal read are unchanged. */
+        float h = fmaxf(v->bars[i], TICK_BAR * v->tick) * hmax, tt, tri;
 
         if (h < 1.0f)
             h = 1.0f;
