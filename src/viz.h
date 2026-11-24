@@ -60,6 +60,16 @@ float viz_band_mean(const float *bars, int from, int to);
 
 /* viz_gate applied to the mean of bars[from..to). */
 float viz_band_gate(const float *bars, int from, int to, float floor);
+/* Largest bar in bars[from..to). */
+float viz_band_peak(const float *bars, int from, int to);
+/* Gate that a lone tone can open: the larger of viz_band_gate and a capped
+ * gate on the band's peak. Dense music gives the same value as viz_band_gate. */
+float viz_tonal_gate(const float *bars, int from, int to, float floor);
+/* Raises rise[g] to a peak-based onset where a narrowband sound enters band g.
+ * Never lowers rise. Call after viz_onset, on the same bars and average. */
+void viz_onset_peak(const float *bars, const float *avg, int nbars, float *rise, int groups);
+/* Peak-based flux: the largest single-bar rise, past a dead zone, capped at 0.3. */
+float viz_flux_peak(const float *prev, const float *cur, int n);
 
 /* Spectral flux: mean positive rise per bar between two frames, scaled and
  * clamped to 0..1. Zero when the spectrum is steady or only falling. */

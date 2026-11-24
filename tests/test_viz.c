@@ -547,6 +547,84 @@ main(void)
         }
     }
 
+    /* Tone-aware detectors: a lone sine must read as sound, while hiss and
+     * dense music keep their old values. */
+    {
+        float z[48], hiss[48], lone[48], dense[48], avg[48], cur[48];
+        float rise[VIZ_ONSET_GROUPS], flux_prev[48], flux_cur[48];
+        float g_lone;
+        int k;
+
+        for (k = 0; k < 48; ++k) {
+            z[k] = 0.0f;
+            hiss[k] = 0.01f;
+            lone[k] = 0.0f;
+            dense[k] = 0.5f;
+        }
+        lone[10] = 0.55f;
+        CHECK(viz_tonal_gate(z, 0, 48, 0.03f) == 0.0f, "tonal gate is shut in silence");
+        CHECK(viz_tonal_gate(hiss, 0, 48, 0.03f) == 0.0f, "tonal gate stays shut for hiss");
+        g_lone = viz_tonal_gate(lone, 0, 48, 0.03f);
+        CHECK(g_lone > 0.3f && g_lone <= 0.6f, "a lone tone opens the tonal gate partway");
+        CHECK(viz_tonal_gate(dense, 0, 48, 0.03f) == viz_band_gate(dense, 0, 48, 0.03f),
+              "dense music gives the same gate as before");
+        CHECK(fabsf(viz_band_peak(lone, 0, 48) - 0.55f) < 1e-6f, "band peak finds the top bar");
+
+        /* Peak onsets: steady stays at zero, a lone bar entering its band fires
+         * only that band, and a rise under the margin is ignored. */
+        for (k = 0; k < 48; ++k) {
+            avg[k] = 0.3f;
+            cur[k] = 0.3f;
+        }
+        for (k = 0; k < VIZ_ONSET_GROUPS; ++k)
+            rise[k] = 0.0f;
+        viz_onset_peak(cur, avg, 48, rise, VIZ_ONSET_GROUPS);
+        {
+            int any = 0;
+            for (k = 0; k < VIZ_ONSET_GROUPS; ++k)
+                if (rise[k] != 0.0f)
+                    any = 1;
+            CHECK(!any, "steady spectrum gives no peak onset");
+        }
+        cur[20] = 0.8f;
+        viz_onset_peak(cur, avg, 48, rise, VIZ_ONSET_GROUPS);
+        CHECK(rise[2] > 0.5f, "a lone bar entering band 2 fires that band");
+        CHECK(rise[0] == 0.0f && rise[1] == 0.0f && rise[3] == 0.0f,
+              "a lone bar fires only its own band");
+        for (k = 0; k < VIZ_ONSET_GROUPS; ++k)
+            rise[k] = 0.0f;
+        cur[20] = 0.5f;
+        viz_onset_peak(cur, avg, 48, rise, VIZ_ONSET_GROUPS);
+        CHECK(rise[2] == 0.0f, "a peak rise under the margin is ignored");
+
+        /* Peak flux: jitter and steady give zero, a real rise is positive and
+         * capped, and a fall gives zero. */
+        for (k = 0; k < 48; ++k) {
+            flux_prev[k] = 0.3f;
+            flux_cur[k] = 0.3f;
+        }
+        CHECK(viz_flux_peak(flux_prev, flux_cur, 48) == 0.0f, "steady gives no peak flux");
+        flux_cur[5] = 0.31f;
+        CHECK(viz_flux_peak(flux_prev, flux_cur, 48) == 0.0f, "jitter under the dead zone is ignored");
+        flux_cur[5] = 0.35f;
+        {
+            const float pf = viz_flux_peak(flux_prev, flux_cur, 48);
+            CHECK(pf > 0.0f && pf <= 0.3f, "a single bar rising gives positive peak flux");
+        }
+        for (k = 0; k < 48; ++k)
+            flux_cur[k] = 0.0f;
+        CHECK(viz_flux_peak(flux_prev, flux_cur, 48) == 0.0f, "a pure fall gives no peak flux");
+
+        /* Novelty: a lone tone that moves scores well above its old value. */
+        for (k = 0; k < 48; ++k) {
+            avg[k] = 0.0f;
+            cur[k] = 0.0f;
+        }
+        avg[5] = 0.5f;
+        cur[10] = 0.5f;
+        CHECK(viz_novelty(avg, cur, 48) >= 0.15f, "a lone moving tone reads as a section change");
+    }
+
     /* Balance, side mixing and side brightness: the building blocks for stereo
      * across the fractal. */
     {

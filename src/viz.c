@@ -233,6 +233,76 @@ viz_band_gate(const float *bars, int from, int to, float floor)
     return viz_gate(viz_band_mean(bars, from, to), floor);
 }
 
+/* Tone-aware detectors. A lone sine lights only a few bars, so a mean over all
+ * of them sits under every floor. These take the peak as well, capped so dense
+ * music keeps the old values. */
+#define TONAL_K           0.4f  /* scales the peak toward the gate */
+#define TONAL_CAP         0.6f  /* the most a lone peak may open the gate */
+#define ONSET_PEAK_MARGIN 0.30f
+#define ONSET_PEAK_GAIN   3.0f
+#define FLUX_DEAD         0.015f /* per-bar rise under this is jitter */
+#define FLUX_PEAK_GAIN    6.0f
+#define FLUX_PEAK_CAP     0.3f
+#define NOVELTY_MIN_BARS  4     /* novelty never divides by fewer active bars */
+#define NOVELTY_ACTIVE    0.1f  /* a bar above this, either now or in the average, is sounding */
+
+float
+viz_band_peak(const float *bars, int from, int to)
+{
+    float p = 0.0f;
+    int i;
+
+    for (i = from; i < to; ++i)
+        if (bars[i] > p)
+            p = bars[i];
+    return p;
+}
+
+float
+viz_tonal_gate(const float *bars, int from, int to, float floor)
+{
+    const float mean_g = viz_band_gate(bars, from, to, floor);
+    const float tonal = TONAL_CAP
+        * viz_gate(TONAL_K * viz_band_peak(bars, from, to), floor);
+
+    return mean_g > tonal ? mean_g : tonal;
+}
+
+void
+viz_onset_peak(const float *bars, const float *avg, int nbars, float *rise, int groups)
+{
+    int g;
+
+    /* Raises rise[] where a narrowband sound enters a band; never lowers it. */
+    for (g = 0; g < groups; ++g) {
+        const int from = g * nbars / groups, to = (g + 1) * nbars / groups;
+        float e = (viz_band_peak(bars, from, to) - viz_band_peak(avg, from, to)
+                   - ONSET_PEAK_MARGIN) * ONSET_PEAK_GAIN;
+
+        if (e < 0.0f)
+            e = 0.0f;
+        if (e > 1.0f)
+            e = 1.0f;
+        if (e > rise[g])
+            rise[g] = e;
+    }
+}
+
+float
+viz_flux_peak(const float *prev, const float *cur, int n)
+{
+    float m = 0.0f, f;
+    int i;
+
+    for (i = 0; i < n; ++i)
+        if (cur[i] - prev[i] > m)
+            m = cur[i] - prev[i];
+    if (m <= FLUX_DEAD)
+        return 0.0f;
+    f = (m - FLUX_DEAD) * FLUX_PEAK_GAIN;
+    return f > FLUX_PEAK_CAP ? FLUX_PEAK_CAP : f;
+}
+
 float
 viz_flux(const float *prev, const float *cur, int n)
 {
@@ -486,13 +556,25 @@ float
 viz_novelty(const float *avg, const float *cur, int n)
 {
     float sum = 0.0f;
-    int i;
+    int i, active = 0;
 
     if (n <= 0)
         return 0.0f;
-    for (i = 0; i < n; ++i)
+    /* Mean change over the bars that are sounding. A dense spectrum has all of
+     * them active, so it scores as before; a lone tone that moves is no longer
+     * diluted across every bar that is silent. */
+    for (i = 0; i < n; ++i) {
+        const float hi = cur[i] > avg[i] ? cur[i] : avg[i];
+
         sum += fabsf(cur[i] - avg[i]);
-    return sum / (float)n;
+        if (hi > NOVELTY_ACTIVE)
+            ++active;
+    }
+    if (active < NOVELTY_MIN_BARS)
+        active = NOVELTY_MIN_BARS;
+    if (active > n)
+        active = n;
+    return sum / (float)active;
 }
 
 /* Resamples bars linearly onto n outline points, bass to treble, with mean
