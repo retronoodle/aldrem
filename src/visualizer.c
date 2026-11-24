@@ -216,6 +216,11 @@ actors_update(VizView *v, float dt, int nb, int section_fired,
          * still comes from the band's balance, so it lands on the side that fired. */
         viz_onset(v->cbars_l, v->spec_avg_l, nb, rise_l, VIZ_ONSET_GROUPS);
         viz_onset(v->cbars_r, v->spec_avg_r, nb, rise_r, VIZ_ONSET_GROUPS);
+        /* Peak onsets raise the same arrays, so a lone tone entering a band
+         * counts as an onset too. */
+        viz_onset_peak(v->cbars, v->spec_avg, nb, rise, VIZ_ONSET_GROUPS);
+        viz_onset_peak(v->cbars_l, v->spec_avg_l, nb, rise_l, VIZ_ONSET_GROUPS);
+        viz_onset_peak(v->cbars_r, v->spec_avg_r, nb, rise_r, VIZ_ONSET_GROUPS);
         for (g = 0; g < VIZ_ONSET_GROUPS; ++g) {
             if (rise_l[g] > rise[g])
                 rise[g] = rise_l[g];
@@ -256,7 +261,9 @@ actors_update(VizView *v, float dt, int nb, int section_fired,
         const int from = g * nb / VIZ_ONSET_GROUPS;
         const int to = (g + 1) * nb / VIZ_ONSET_GROUPS;
 
-        lvl[g] = viz_band_mean(v->bars, from, to);
+        /* A lone tone holds its actors through its peak, not the diluted mean. */
+        lvl[g] = fmaxf(viz_band_mean(v->bars, from, to),
+                       0.5f * viz_band_peak(v->bars, from, to));
     }
     rate = reduce_motion ? 0.0f : (v->flux + 0.5f * v->kick) * v->master;
     for (a = 0; a < VIZ_ACTORS; ++a) {
@@ -416,8 +423,9 @@ viz_view_update(VizView *v, const VizSettings *s, float dt, int active,
     for (i = 0; i < nb; ++i)
         sum_all += v->cbars[i];
     v->level = nb ? sum_all / (float)nb : 0.0f;
-    v->master = viz_band_gate(v->bars, 0, nb, 0.03f);
-    v->mid_gate = viz_band_gate(v->bars, q, h, 0.03f);
+    /* The tonal gate lets a lone sine open the picture as well as dense sound. */
+    v->master = viz_tonal_gate(v->bars, 0, nb, 0.03f);
+    v->mid_gate = viz_tonal_gate(v->bars, q, h, 0.03f);
 
     /* Spectral flux: how much the spectrum is rising right now. A steady tone
      * gives zero, so the kaleidoscope stops; each new note turns it. The
@@ -425,14 +433,22 @@ viz_view_update(VizView *v, const VizSettings *s, float dt, int active,
      * master so silence holds the picture still. */
     /* Flux is the largest of the mono and per-side rises, so a sound that
      * only lives on one side still turns the kaleidoscope. */
-    flux_now = v->primed ? viz_flux(v->prev_bars, v->cbars, nb) : 0.0f;
+    /* Each measure also has a peak form, so a single moving tone turns it. */
+    flux_now = 0.0f;
     if (v->primed) {
-        const float fl = viz_flux(v->prev_bars_l, v->cbars_l, nb);
-        const float fr = viz_flux(v->prev_bars_r, v->cbars_r, nb);
-        if (fl > flux_now)
-            flux_now = fl;
-        if (fr > flux_now)
-            flux_now = fr;
+        const float cand[6] = {
+            viz_flux(v->prev_bars, v->cbars, nb),
+            viz_flux_peak(v->prev_bars, v->cbars, nb),
+            viz_flux(v->prev_bars_l, v->cbars_l, nb),
+            viz_flux_peak(v->prev_bars_l, v->cbars_l, nb),
+            viz_flux(v->prev_bars_r, v->cbars_r, nb),
+            viz_flux_peak(v->prev_bars_r, v->cbars_r, nb),
+        };
+        int c;
+
+        for (c = 0; c < 6; ++c)
+            if (cand[c] > flux_now)
+                flux_now = cand[c];
     }
     flux_now *= v->master;
     memcpy(v->prev_bars, v->cbars, (size_t)nb * sizeof v->cbars[0]);
