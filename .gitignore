@@ -22,6 +22,7 @@ tests/test_vu
 tests/test_settings
 tests/test_finder
 tests/test_radio
+tests/test_favorites
 tests/test_stream
 tests/test_playlist
 tests/test_net

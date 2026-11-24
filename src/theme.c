@@ -1142,6 +1142,57 @@ mp_bubble_draw(struct nk_context *ctx, struct nk_rect bubble, const char *text,
 }
 
 int
+mp_star(struct nk_context *ctx, float scale, const struct MpTheme *th,
+    int filled)
+{
+    struct nk_command_buffer *canvas;
+    struct nk_rect bounds;
+    struct nk_color col;
+    float pts[20];
+    float cx, cy, ro, ri, thick;
+    int hover, i;
+
+    if (nk_widget(&bounds, ctx) == NK_WIDGET_INVALID)
+        return 0;
+    canvas = nk_window_get_canvas(ctx);
+    hover = nk_input_is_mouse_hovering_rect(&ctx->input, bounds);
+
+    cx = bounds.x + bounds.w * 0.5f;
+    cy = bounds.y + bounds.h * 0.5f;
+    ro = (bounds.w < bounds.h ? bounds.w : bounds.h) * 0.46f;
+    ri = ro * 0.46f;
+    thick = mp_s(1.5f, scale);
+
+    /* Ten vertices alternating outer and inner radius, starting at the top. */
+    for (i = 0; i < 10; i++) {
+        float a = -3.14159265f * 0.5f + (float)i * 3.14159265f / 5.0f;
+        float r = (i % 2 == 0) ? ro : ri;
+
+        pts[i * 2] = cx + r * cosf(a);
+        pts[i * 2 + 1] = cy + r * sinf(a);
+    }
+
+    if (filled)
+        col = mp_theme_accent(th);
+    else
+        col = hover ? th->text_primary : th->text_secondary;
+    if (filled) {
+        /* nk_fill_polygon only handles convex outlines, so fan triangles
+         * from the centre to each edge of the (concave) star instead. */
+        for (i = 0; i < 10; i++) {
+            int j = (i + 1) % 10;
+
+            nk_fill_triangle(canvas, cx, cy, pts[i * 2], pts[i * 2 + 1],
+                             pts[j * 2], pts[j * 2 + 1], col);
+        }
+    } else {
+        nk_stroke_polygon(canvas, pts, 10, thick, col);
+    }
+
+    return nk_input_is_mouse_click_in_rect(&ctx->input, NK_BUTTON_LEFT, bounds);
+}
+
+int
 mp_seek_bar(struct nk_context *ctx, float scale, const struct MpTheme *th,
     float frac, int enabled, int *dragging, float *preview, double duration,
     float dt, struct MpSeekAnim *anim)

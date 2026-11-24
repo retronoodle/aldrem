@@ -125,6 +125,12 @@ int mp_button(struct nk_context *ctx, float scale, const struct MpTheme *th,
               int tab, int enabled, struct MpAnim *anim,
               const struct MpButtonOpts *opt);
 
+/* Favourite star, drawn from primitives (the default font has no symbols).
+ * Filled in the accent colour when `filled`, outlined otherwise. Returns 1 when
+ * a left click is released inside it this frame. Sized to the layout slot. */
+int mp_star(struct nk_context *ctx, float scale, const struct MpTheme *th,
+            int filled);
+
 /* Seek bar and volume slider: the same glass-and-accent recipe as the buttons,
  * with the seek row's drag contract unchanged from the old main.c bar. Both
  * structs are caller-owned per-widget state, held across frames (never a

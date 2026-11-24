@@ -27,6 +27,7 @@
 #include "playlist.h"
 #include "radio.h"
 #include "radio_search.h"
+#include "favorites.h"
 #include "settings.h"
 #include "theme.h"
 #include "track.h"
@@ -1044,28 +1045,59 @@ ui_radio_play(Playlist *pl, const RadioStation *st, char *msg, size_t msglen)
     msg[0] = '\0';
 }
 
-/* Plays the search result at row index (copies it out first: radio_search_at
- * reuses one buffer). */
-static void
-ui_radio_play_row(Playlist *pl, RadioSearch *rs, int index, char *msg,
-    size_t msglen)
+/* The Radio list shows either the search results (mode 0) or the saved
+ * favorites (mode 1). */
+#define RADIO_MODE_SEARCH 0
+#define RADIO_MODE_FAVS   1
+
+static int
+ui_radio_count(const RadioSearch *rs, int mode)
 {
-    const RadioStation *st = radio_search_at(rs, index);
+    return mode == RADIO_MODE_SEARCH ? radio_search_count(rs) : favorites_count();
+}
 
-    if (st) {
-        RadioStation copy = *st;
+/* Copies row i of the list in mode into out. Returns 0 when there is no such
+ * row. Copy at once: radio_search_at reuses one buffer. */
+static int
+ui_radio_row_station(const RadioSearch *rs, int mode, int i, RadioStation *out)
+{
+    const RadioStation *st = mode == RADIO_MODE_SEARCH
+        ? radio_search_at(rs, i) : favorites_at(i);
 
+    if (!st)
+        return 0;
+    *out = *st;
+    return 1;
+}
+
+/* Clears the checkboxes and the selection, for when the list underneath
+ * changes (a new search, another list, a favourite removed). */
+static void
+ui_radio_reset_rows(unsigned char *checked, int *selected, int *last_click)
+{
+    memset(checked, 0, FAV_MAX);
+    *selected = -1;
+    *last_click = -1;
+}
+
+/* Plays row index of the list in mode. */
+static void
+ui_radio_play_row(Playlist *pl, RadioSearch *rs, int mode, int index,
+    char *msg, size_t msglen)
+{
+    RadioStation copy;
+
+    if (ui_radio_row_station(rs, mode, index, &copy))
         ui_radio_play(pl, &copy, msg, msglen);
-    }
 }
 
 /* Adds the checked stations (all = every result). Copies them out first:
  * radio_search_at hands back one station at a time. */
 static void
-ui_radio_add(Playlist *pl, RadioSearch *rs, const unsigned char *checked,
-    int all, char *msg, size_t msglen)
+ui_radio_add(Playlist *pl, RadioSearch *rs, int mode,
+    const unsigned char *checked, int all, char *msg, size_t msglen)
 {
-    const int count = radio_search_count(rs);
+    const int count = ui_radio_count(rs, mode);
     RadioStation *picked;
     const char **urls, **names;
     int i, n = 0, added, full = 0;
@@ -1089,14 +1121,10 @@ ui_radio_add(Playlist *pl, RadioSearch *rs, const unsigned char *checked,
         return;
     }
     for (i = 0, n = 0; i < count; i++) {
-        const RadioStation *st;
-
         if (!all && !checked[i])
             continue;
-        st = radio_search_at(rs, i);
-        if (!st)
+        if (!ui_radio_row_station(rs, mode, i, &picked[n]))
             continue;
-        picked[n] = *st;
         urls[n] = picked[n].url;
         names[n] = picked[n].name;
         n++;
@@ -1136,7 +1164,8 @@ static int
 ui_radio_modal(struct nk_context *ctx, float scale, float screen_w,
     float screen_h, RadioSearch *rs, Playlist *pl, char *query, size_t querylen,
     unsigned char *checked, int *selected, int *searched, int *focus,
-    char *msg, size_t msglen, int *last_click, Uint32 *last_click_ms)
+    char *msg, size_t msglen, int *last_click, Uint32 *last_click_ms,
+    int *mode, const struct MpTheme *th)
 {
     struct nk_rect bounds;
     float margin = mp_s(40.0f, scale);
@@ -1147,6 +1176,7 @@ ui_radio_modal(struct nk_context *ctx, float scale, float screen_w,
     int running, count;
     int keep = 1;
     int play_row = -1;
+    int star_row = -1;
 
     if (w > screen_w - 2.0f * margin)
         w = screen_w - 2.0f * margin;
@@ -1164,47 +1194,80 @@ ui_radio_modal(struct nk_context *ctx, float scale, float screen_w,
                  NK_WINDOW_BORDER | NK_WINDOW_TITLE | NK_WINDOW_NO_SCROLLBAR)) {
         nk_flags evt;
         int do_search = 0;
+        int in_search;
         char status[200];
         const char *err;
 
-        nk_layout_row_dynamic(ctx, row_h, 1);
-        nk_label(ctx, "Station name (internet radio via Radio Browser):",
-                 NK_TEXT_LEFT);
-
-        if (*focus) {
-            nk_edit_focus(ctx, 0);
-            *focus = 0;
+        /* Search results and favorites share one list; switching resets the
+         * checkboxes and selection, which belong to the old rows. */
+        nk_layout_row_dynamic(ctx, row_h, 2);
+        if (nk_option_label(ctx, "Search", *mode == RADIO_MODE_SEARCH) &&
+            *mode != RADIO_MODE_SEARCH) {
+            *mode = RADIO_MODE_SEARCH;
+            ui_radio_reset_rows(checked, selected, last_click);
         }
-        nk_layout_row_dynamic(ctx, row_h, 1);
-        evt = nk_edit_string_zero_terminated(ctx,
-            NK_EDIT_FIELD | NK_EDIT_SIG_ENTER, query, (int)querylen,
-            nk_filter_default);
-        if (evt & NK_EDIT_COMMITED)
-            do_search = 1;
+        if (nk_option_label(ctx, "Favorites", *mode == RADIO_MODE_FAVS) &&
+            *mode != RADIO_MODE_FAVS) {
+            *mode = RADIO_MODE_FAVS;
+            ui_radio_reset_rows(checked, selected, last_click);
+        }
+        in_search = *mode == RADIO_MODE_SEARCH;
 
-        running = radio_search_running(rs);
-        nk_layout_row_dynamic(ctx, bar_h, 2);
-        if (running) {
-            if (nk_button_label(ctx, "Stop"))
+        if (in_search) {
+            nk_layout_row_dynamic(ctx, row_h, 1);
+            nk_label(ctx, "Station name (internet radio via Radio Browser):",
+                     NK_TEXT_LEFT);
+
+            if (*focus) {
+                nk_edit_focus(ctx, 0);
+                *focus = 0;
+            }
+            nk_layout_row_dynamic(ctx, row_h, 1);
+            evt = nk_edit_string_zero_terminated(ctx,
+                NK_EDIT_FIELD | NK_EDIT_SIG_ENTER, query, (int)querylen,
+                nk_filter_default);
+            if (evt & NK_EDIT_COMMITED)
+                do_search = 1;
+        }
+
+        running = in_search && radio_search_running(rs);
+        if (in_search) {
+            nk_layout_row_dynamic(ctx, bar_h, 2);
+            if (running) {
+                if (nk_button_label(ctx, "Stop"))
+                    radio_search_cancel(rs);
+            } else if (nk_button_label(ctx, "Search")) {
+                do_search = 1;
+            }
+        } else {
+            nk_layout_row_dynamic(ctx, bar_h, 1);
+            /* A search started in Search mode keeps running here, so keep
+             * its Stop button available. */
+            if (radio_search_running(rs) && nk_button_label(ctx, "Stop"))
                 radio_search_cancel(rs);
-        } else if (nk_button_label(ctx, "Search")) {
-            do_search = 1;
         }
         if (nk_button_label(ctx, "Close"))
             keep = 0;
 
         if (do_search && !running && query[0]) {
-            memset(checked, 0, RADIO_MAX_RESULT);
+            memset(checked, 0, FAV_MAX);
             *selected = -1;
             *searched = 1;
             if (radio_search_start(rs, query) == 0)
                 msg[0] = '\0';
         }
-        running = radio_search_running(rs);
-        count = radio_search_count(rs);
+        running = in_search && radio_search_running(rs);
+        count = ui_radio_count(rs, *mode);
         err = radio_search_error(rs);
 
-        if (running)
+        if (!in_search) {
+            if (count == 0)
+                snprintf(status, sizeof status,
+                         "No favorites yet. Star a station in Search.");
+            else
+                snprintf(status, sizeof status, "%d favorite%s, saved.",
+                         count, count == 1 ? "" : "s");
+        } else if (running)
             snprintf(status, sizeof status, "%s",
                      radio_search_cancelled(rs) ? "Stopping..." : "Searching...");
         else if (err[0])
@@ -1239,23 +1302,24 @@ ui_radio_modal(struct nk_context *ctx, float scale, float screen_w,
                 int i;
 
                 for (i = view.begin; i < view.end; i++) {
-                    const RadioStation *st = radio_search_at(rs, i);
                     RadioStation copy;
                     char label[600];
                     nk_bool on = checked[i] ? nk_true : nk_false;
 
-                    if (!st)
+                    if (!ui_radio_row_station(rs, *mode, i, &copy))
                         continue;
-                    copy = *st; /* radio_search_at reuses one buffer */
                     ui_radio_row_label(&copy, label, sizeof label);
 
                     nk_layout_row_template_begin(ctx, row_h);
+                    nk_layout_row_template_push_static(ctx, row_h);
                     nk_layout_row_template_push_static(ctx, row_h);
                     nk_layout_row_template_push_dynamic(ctx);
                     nk_layout_row_template_end(ctx);
 
                     nk_checkbox_label(ctx, "", &on);
                     checked[i] = on ? 1 : 0;
+                    if (mp_star(ctx, scale, th, favorites_has(copy.url)))
+                        star_row = i;
                     if (nk_select_label(ctx, label, NK_TEXT_LEFT, *selected == i)) {
                         Uint32 now = SDL_GetTicks();
 
@@ -1278,22 +1342,41 @@ ui_radio_modal(struct nk_context *ctx, float scale, float screen_w,
         /* Deferred until after the list: playing connects, and the list is
          * already laid out for this frame. */
         if (play_row >= 0)
-            ui_radio_play_row(pl, rs, play_row, msg, msglen);
+            ui_radio_play_row(pl, rs, *mode, play_row, msg, msglen);
+        /* Starring also waits for the list: removing a favourite mid-list
+         * would shift the rows still to be drawn. */
+        if (star_row >= 0) {
+            RadioStation copy;
+
+            if (ui_radio_row_station(rs, *mode, star_row, &copy)) {
+                int rc = favorites_toggle(&copy);
+
+                if (rc == FAV_FULL)
+                    snprintf(msg, msglen, "Favorites is full (%d stations).",
+                             FAV_MAX);
+                else if (rc == FAV_IO)
+                    snprintf(msg, msglen, "Could not save favorites.");
+                else
+                    msg[0] = '\0';
+                if (*mode == RADIO_MODE_FAVS)
+                    ui_radio_reset_rows(checked, selected, last_click);
+            }
+        }
 
         nk_layout_row_dynamic(ctx, bar_h, 3);
         if (running || *selected < 0)
             nk_widget_disable_begin(ctx);
         if (nk_button_label(ctx, "Play"))
-            ui_radio_play_row(pl, rs, *selected, msg, msglen);
+            ui_radio_play_row(pl, rs, *mode, *selected, msg, msglen);
         if (running || *selected < 0)
             nk_widget_disable_end(ctx);
 
         if (running || count == 0)
             nk_widget_disable_begin(ctx);
         if (nk_button_label(ctx, "Add selected"))
-            ui_radio_add(pl, rs, checked, 0, msg, msglen);
+            ui_radio_add(pl, rs, *mode, checked, 0, msg, msglen);
         if (nk_button_label(ctx, "Add all"))
-            ui_radio_add(pl, rs, checked, 1, msg, msglen);
+            ui_radio_add(pl, rs, *mode, checked, 1, msg, msglen);
         if (running || count == 0)
             nk_widget_disable_end(ctx);
     }
@@ -1424,6 +1507,7 @@ main(int argc, char **argv)
         SDL_Log("finder allocation failed; Find audio is disabled");
 
     RadioSearch *radio = radio_search_create();
+    favorites_load();
     if (!radio)
         SDL_Log("radio allocation failed; Radio is disabled");
 
@@ -1465,7 +1549,8 @@ main(int argc, char **argv)
     Uint32 radio_last_click_ms = 0;
     char radio_query[256] = "";
     char radio_msg[256] = "";
-    unsigned char radio_checked[RADIO_MAX_RESULT];
+    int radio_mode = RADIO_MODE_SEARCH;
+    unsigned char radio_checked[FAV_MAX];
 
     struct UiButtons buttons;
     memset(&buttons, 0, sizeof buttons);
@@ -2018,7 +2103,8 @@ main(int argc, char **argv)
                                 pl, radio_query, sizeof radio_query,
                                 radio_checked, &radio_sel, &radio_searched,
                                 &radio_focus, radio_msg, sizeof radio_msg,
-                                &radio_last_click, &radio_last_click_ms)) {
+                                &radio_last_click, &radio_last_click_ms,
+                                &radio_mode, &theme)) {
                 radio_search_cancel(radio);
                 radio_open = 0;
                 SDL_StopTextInput();

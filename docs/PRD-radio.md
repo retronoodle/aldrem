@@ -11,6 +11,7 @@ Let the user find and play internet radio stations inside Aldrem. They search th
 - **Mirrors:** the mirror list comes from `https://all.api.radio-browser.info/json/servers`. If it cannot be fetched, `de1.api.radio-browser.info` is used. Mirror hosts are checked against `[A-Za-z0-9.-]` before use.
 - **Matching:** `/json/stations/search` with `hidebroken=true`, ordered by click count, capped at 200 results. Only stations with an `http(s)` `url_resolved` are kept. Only codecs the build can decode are kept: MP3 and Ogg always, AAC/AAC+ only when built with FFmpeg (`AAC=1`).
 - **Results:** one row per station, shown as `name - country - codec bitrate`. Clicking a row selects it. Checkboxes pick stations to add. `Play` plays the selected row. `Add selected` and `Add all` add to the playlist.
+- **Favorites:** each row has a star. Clicking it saves the station as a favorite, or removes it when already saved. Starred stations are marked in every search. A `Favorites` option in the dialog switches the list to the saved stations, with the same Play, Add and checkbox controls. Favorites are keyed by stream URL, capped at 500, and saved at once to `$XDG_CONFIG_HOME/aldrem/favorites.tsv` (one tab-separated station per line, written through a temp file and rename). Removing a favorite is the same star click, in either list.
 - **Adding:** one batch add, with one autosave for the batch. A station already in the playlist is skipped silently. As with files, the first new entry starts when the player is idle.
 - **Playing:** a stream opens with a connect timeout of 5 s and a first-data timeout of 8 s. The time label shows elapsed time and `LIVE`. The seek bar is disabled. Pause on a live stream stops it, and Play reconnects, so no stale audio is played. Prev on row 0 reconnects. Titles and row labels use the station name.
 - **Stream playback:** the codec comes from `Content-Type` (`audio/mpeg`, `audio/ogg`, `audio/aac`, `audio/aacp`, `audio/x-aac`), and falls back to sniffing the first bytes (`OggS`, `ID3`, MPEG sync, ADTS).
@@ -21,7 +22,7 @@ Let the user find and play internet radio stations inside Aldrem. They search th
 
 ## Why this is not a general streaming service
 
-The feature is a directory client plus a live decoder, nothing more. No account, no catalogue, no history, no recommendations. Stations come from Radio Browser, a community directory with no API key. Nothing is stored between sessions except the playlist that already autosaves.
+The feature is a directory client plus a live decoder, nothing more. No account, no catalogue, no history, no recommendations. Stations come from Radio Browser, a community directory with no API key. Nothing is stored between sessions except the playlist that already autosaves and the user's favorite stations.
 
 ## Licensing
 
@@ -63,6 +64,7 @@ The network surface is deliberately small:
 4. Playback: `src/track.h` / `src/track.c` (`TrackInfo.is_live`, `track_interrupt`), `src/playback.c` / `src/playback.h` (live status, seek refused, pause means stop, interrupt before joining the decoder).
 5. Playlist: `src/playlist.c` / `src/playlist.h` (station entries, `#EXTINF` names kept in step with paths, `playlist_add_stations`, `playlist_label_at`), with `tests/test_playlist.c`.
 6. Search worker: `src/radio_search.c` / `src/radio_search.h`, which runs the fetch and parse on its own thread.
-7. UI: `src/main.c` (`Radio` button, `ui_radio_modal`, live time label, disabled seek bar, station labels).
-8. Build and CI: `Makefile` (`NET`, `AAC`, the new sources and test targets), `.github/workflows/build.yml` (libcurl and FFmpeg on Linux, curl and ffmpeg via Homebrew on macOS, and one `NET=0 AAC=0` leg).
-9. Docs: this PRD, plus `README.md`, `CONTRIBUTING.md` and `SECURITY.md`.
+7. Favorites: `src/favorites.c` / `src/favorites.h` (URL-keyed list saved as `favorites.tsv`), with `tests/test_favorites.c`.
+8. UI: `src/main.c` (`Radio` button, `ui_radio_modal`, live time label, disabled seek bar, station labels).
+9. Build and CI: `Makefile` (`NET`, `AAC`, the new sources and test targets), `.github/workflows/build.yml` (libcurl and FFmpeg on Linux, curl and ffmpeg via Homebrew on macOS, and one `NET=0 AAC=0` leg).
+10. Docs: this PRD, plus `README.md`, `CONTRIBUTING.md` and `SECURITY.md`.

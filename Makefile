@@ -36,7 +36,7 @@ TARGET  := aldrem
 SRC := src/main.c src/playback.c src/track.c src/track_wav.c src/track_mp3.c \
        src/track_flac.c src/track_ogg.c src/track_aiff.c src/file_browser.c \
        src/playlist.c src/theme.c src/vu.c src/viz.c src/visualizer.c src/settings.c src/finder.c \
-       src/net.c src/radio.c src/radio_search.c src/track_stream.c \
+       src/net.c src/radio.c src/radio_search.c src/favorites.c src/track_stream.c \
        src/track_stream_aac.c src/tags.c vendor/stb_vorbis.c
 OBJ := $(patsubst %.c,build/obj/%.o,$(SRC))
 
@@ -73,7 +73,7 @@ endif
 
 HDR := src/playback.h src/track.h src/track_internal.h src/track_stream_internal.h \
        src/file_browser.h src/playlist.h src/theme.h src/vu.h src/viz.h src/visualizer.h src/settings.h \
-       src/finder.h src/net.h src/tags.h src/radio.h src/radio_search.h vendor/jsmn.h \
+       src/finder.h src/net.h src/tags.h src/radio.h src/radio_search.h src/favorites.h vendor/jsmn.h \
        src/nuklear_config.h vendor/nuklear.h \
        vendor/nuklear_sdl_renderer.h vendor/minimp3.h vendor/dr_flac.h \
        vendor/stb_vorbis.c
@@ -188,6 +188,10 @@ tests/test_finder: tests/test_finder.c src/finder.c src/finder.h
 tests/test_radio: tests/test_radio.c src/radio.c src/radio.h vendor/jsmn.h
 	$(CC) $(CFLAGS) -Isrc -o $@ tests/test_radio.c src/radio.c $(LDLIBS)
 
+# Starred radio stations: URL-keyed list, saved to an isolated XDG config dir.
+tests/test_favorites: tests/test_favorites.c src/favorites.c src/favorites.h src/radio.h
+	$(CC) $(CFLAGS) -Isrc -o $@ tests/test_favorites.c src/favorites.c $(LDLIBS)
+
 # Playlist station entries: names kept in step with paths, #EXTINF and URL
 # lines. Runs the real playlist.c against an isolated XDG config dir.
 # Embedded title/artist readers, against synthetic tagged fixtures.
@@ -214,10 +218,11 @@ endif
 # build never needs python3. `make test FIXTURE=path/to.wav` runs it.
 # The decoder round-trip opens a device, so pin the dummy driver: CI runners
 # and headless boxes have no sound card, and decoding does not need one.
-test: $(TARGET) tests/test_load tests/test_vu tests/test_viz tests/test_settings tests/test_finder tests/test_radio tests/test_stream tests/test_playlist tests/test_tags $(TEST_NET_BIN)
+test: $(TARGET) tests/test_load tests/test_vu tests/test_viz tests/test_settings tests/test_finder tests/test_radio tests/test_favorites tests/test_stream tests/test_playlist tests/test_tags $(TEST_NET_BIN)
 	./tests/test_vu
 	./tests/test_viz
 	./tests/test_radio
+	mkdir -p build/test-xdg && XDG_CONFIG_HOME=build/test-xdg ./tests/test_favorites
 	./tests/test_stream tests/data
 	./tests/test_tags
 	rm -rf build/test-playlist && ./tests/test_playlist build/test-playlist tests/data/tone.mp3
@@ -232,6 +237,6 @@ test: $(TARGET) tests/test_load tests/test_vu tests/test_viz tests/test_settings
 	sh tests/smoke.sh ./$(TARGET)
 
 clean:
-	rm -rf build/obj tests/test_load tests/test_vu tests/test_viz tests/test_settings tests/test_finder tests/test_radio tests/test_stream tests/test_playlist tests/test_tags tests/test_net $(TARGET)
+	rm -rf build/obj tests/test_load tests/test_vu tests/test_viz tests/test_settings tests/test_finder tests/test_radio tests/test_favorites tests/test_stream tests/test_playlist tests/test_tags tests/test_net $(TARGET)
 
 .PHONY: run clean build build-obj install uninstall app test $(DESKTOP)
