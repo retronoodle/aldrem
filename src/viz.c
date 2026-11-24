@@ -436,6 +436,21 @@ viz_novelty(const float *avg, const float *cur, int n)
     return sum / (float)n;
 }
 
+float
+viz_shape_metric(float u, float w, int petals, float depth, float phase, float p)
+{
+    const float au = fabsf(u), aw = fabsf(w);
+    float r, div;
+
+    if (p < 1.0f)
+        p = 1.0f;
+    r = powf(powf(au, p) + powf(aw, p), 1.0f / p) / powf(2.0f, 1.0f / p);
+    div = 1.0f + depth * cosf((float)petals * atan2f(w, u) + phase);
+    if (div < 0.4f)
+        div = 0.4f;
+    return r / div;
+}
+
 /* Curated Julia constants: dendrite, rabbit, spiral, Siegel disc, seahorse
  * and basilica. All have |c| <= 1.2 so they stay well inside the bounded set
  * family the fractal's wander is tuned for. */

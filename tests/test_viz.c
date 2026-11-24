@@ -315,6 +315,57 @@ main(void)
         CHECK(viz_novelty(avg, far, 0) == 0.0f, "novelty of no bars is zero");
     }
 
+    /* Shape metric: at p=2 with no depth it is the old circle distance. */
+    {
+        int j;
+        int same = 1, diamond_ok = 1, rot_ok = 1, finite = 1, mono = 1;
+        float prev = -1.0f;
+
+        for (j = 0; j < 40; ++j) {
+            const float a = (float)j * 0.157f;
+            const float u = 0.9f * cosf(a), w = 0.6f * sinf(a);
+            const float old = sqrtf(u * u + w * w) * 0.70710678f;
+            if (fabsf(viz_shape_metric(u, w, 6, 0.0f, 0.0f, 2.0f) - old) > 1e-5f)
+                same = 0;
+        }
+        CHECK(same, "shape metric matches the circle at p=2 with no depth");
+
+        /* p=1 is a diamond: the corner maps to 1, an axis tip to 0.5. */
+        diamond_ok = fabsf(viz_shape_metric(1.0f, 1.0f, 6, 0.0f, 0.0f, 1.0f) - 1.0f) < 1e-5f
+                  && fabsf(viz_shape_metric(1.0f, 0.0f, 6, 0.0f, 0.0f, 1.0f) - 0.5f) < 1e-5f;
+        CHECK(diamond_ok, "diamond maps the corner to 1 and the axis tip to 0.5");
+
+        /* p=4 is squarer: an off-axis point sits closer to the edge than at p=2. */
+        CHECK(viz_shape_metric(1.0f, 0.7f, 6, 0.0f, 0.0f, 4.0f)
+              > viz_shape_metric(1.0f, 0.7f, 6, 0.0f, 0.0f, 2.0f),
+              "squircle is squarer than the circle");
+
+        /* n-fold symmetry at p=2: rotating by 2*pi/n leaves the metric alone. */
+        for (j = 0; j < 20; ++j) {
+            const float a = (float)j * 0.31f;
+            const float phi = 2.0f * 3.14159265f / 5.0f;
+            const float u = 0.7f * cosf(a), w = 0.7f * sinf(a);
+            const float ru = 0.7f * cosf(a + phi), rw = 0.7f * sinf(a + phi);
+            if (fabsf(viz_shape_metric(u, w, 5, 0.4f, 0.0f, 2.0f)
+                      - viz_shape_metric(ru, rw, 5, 0.4f, 0.0f, 2.0f)) > 1e-4f)
+                rot_ok = 0;
+        }
+        CHECK(rot_ok, "petals repeat every 2*pi/n");
+
+        /* Finite at the origin and at maximum depth, and along a ray at depth 0 it grows. */
+        finite = isfinite(viz_shape_metric(0.0f, 0.0f, 6, 0.5f, 0.0f, 2.0f))
+              && isfinite(viz_shape_metric(0.3f, -0.2f, 6, 0.5f, 1.0f, 3.0f));
+        CHECK(finite, "shape metric is finite at the origin and at full depth");
+        for (j = 1; j <= 20; ++j) {
+            const float m = viz_shape_metric((float)j * 0.05f, 0.0f, 6, 0.0f, 0.0f, 2.0f);
+            if (m <= prev)
+                mono = 0;
+            prev = m;
+        }
+        CHECK(mono, "shape metric grows outward along a ray at zero depth");
+        CHECK(diamond_ok && same && rot_ok && finite && mono, "shape metric checks pass");
+    }
+
     /* Anchors: every one sits inside |c| <= 1.2, and indices wrap. */
     {
         int idx;
