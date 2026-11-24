@@ -63,6 +63,9 @@ void playback_get_status(PlaybackStatus *out);
  * size). Lock-free; samples may be slightly torn across a callback boundary,
  * which is fine for display. */
 int  playback_get_samples(float *out, int n);
+/* As playback_get_samples, but the left and right channels separately, for
+ * stereo placement. Same locking and silence rules. */
+int  playback_get_samples_lr(float *l, float *r, int n);
 /* Non-consuming: unlike playback_get_status, leaves a pending EOF alone. */
 int  playback_is_live(void);
 

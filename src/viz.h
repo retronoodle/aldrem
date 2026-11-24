@@ -156,6 +156,11 @@ typedef struct {
 /* Rise of each of groups equal bands of bars over its slow average, 0..1. A
  * rise must clear a margin above the average, so steady sound gives zero. */
 void viz_onset(const float *bars, const float *avg, int nbars, float *rise, int groups);
+/* Per-band stereo balance -1 (all left) .. +1 (all right), 0 centred or silent,
+ * from the left and right bar arrays over the same bands as viz_onset. */
+void viz_pan(const float *bars_l, const float *bars_r, int nbars, float *pan, int groups);
+/* Stage x for an actor from a balance and a -1..1 jitter, kept within ±0.7. */
+float viz_pan_to_x(float pan, float jitter);
 
 /* Slot to use for a new actor among n: a free one, else the dimmest releasing
  * one, else the dimmest overall, with sparks given up before extras and leads.

@@ -605,6 +605,43 @@ viz_onset(const float *bars, const float *avg, int nbars, float *rise, int group
     }
 }
 
+/* Below this combined band level a band counts as silent and centres. */
+#define PAN_FLOOR 0.02f
+
+void
+viz_pan(const float *bars_l, const float *bars_r, int nbars, float *pan, int groups)
+{
+    int g;
+
+    for (g = 0; g < groups; ++g) {
+        const int from = g * nbars / groups, to = (g + 1) * nbars / groups;
+        const float l = viz_band_mean(bars_l, from, to);
+        const float r = viz_band_mean(bars_r, from, to);
+        const float sum = l + r;
+        float p = 0.0f;
+
+        if (sum > PAN_FLOOR)
+            p = (r - l) / sum;
+        if (p < -1.0f)
+            p = -1.0f;
+        else if (p > 1.0f)
+            p = 1.0f;
+        pan[g] = p;
+    }
+}
+
+float
+viz_pan_to_x(float pan, float jitter)
+{
+    float x = pan * 0.6f + jitter * 0.1f;
+
+    if (x < -0.7f)
+        x = -0.7f;
+    else if (x > 0.7f)
+        x = 0.7f;
+    return x;
+}
+
 int
 viz_actor_slot(const VizActor *a, int n)
 {

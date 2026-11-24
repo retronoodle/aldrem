@@ -23,6 +23,12 @@ struct VizView {
     float bars[VIZ_BARS_MAX];   /* smoothed bar heights shown on screen */
     float cbars[VIZ_BARS_MAX];  /* bars lifted for quiet music; the fractal reads these */
     float samples[VIZ_FFT_N];   /* newest mono samples, -1..1 */
+    float samples_l[VIZ_FFT_N]; /* newest left samples, for stereo placement */
+    float samples_r[VIZ_FFT_N]; /* newest right samples */
+    float target_l[VIZ_BARS_MAX]; /* this frame's left bar heights, 0..1 */
+    float target_r[VIZ_BARS_MAX]; /* this frame's right bar heights, 0..1 */
+    float pan[VIZ_ONSET_GROUPS];  /* per-band stereo balance -1..1, read at spawn */
+    float pan_all;              /* whole-band stereo balance, places section leads */
     float pts[2 * VIZ_FFT_N];   /* waveform polyline, x/y pairs */
     unsigned int pixels[FRACTAL_W * FRACTAL_H];
     SDL_Texture *fractal;       /* streaming texture, NULL if unavailable */
@@ -125,6 +131,14 @@ motion_reset(VizView *v)
 #define ONSET_TRIGGER   0.3f
 #define TICK_TRIGGER    0.3f
 
+/* Spread for a spawn's stage x: a -1..1 draw, so a burst fans out around its
+ * balance instead of stacking on one spot. */
+static float
+actor_jitter(VizView *v)
+{
+    return viz_rand01(&v->rng) * 2.0f - 1.0f;
+}
+
 /* The stage cast. A section change retires the cast and brings a new lead; a
  * new sound in a band brings an extra (bass) or a spark (anything higher); a
  * click brings a spark. Every actor then ages with the music and releases when
@@ -147,11 +161,13 @@ actors_update(VizView *v, float dt, int nb, int section_fired,
             if (v->actors[a].live)
                 v->actors[a].releasing = 1;
         slot = viz_actor_slot(v->actors, VIZ_ACTORS);
-        if (slot >= 0)
+        if (slot >= 0) {
             viz_actor_spawn(&v->actors[slot], &v->rng, VIZ_ACTOR_LEAD,
                             (int)(viz_rand01(&v->rng) * VIZ_ONSET_GROUPS)
                                 % VIZ_ONSET_GROUPS,
                             VIZ_ONSET_GROUPS, 1.0f);
+            v->actors[slot].x = viz_pan_to_x(v->pan_all, actor_jitter(v));
+        }
     }
 
     if (!reduce_motion && v->master > 0.0f) {
@@ -167,6 +183,7 @@ actors_update(VizView *v, float dt, int nb, int section_fired,
                 viz_actor_spawn(&v->actors[slot], &v->rng,
                                 g == 0 ? VIZ_ACTOR_EXTRA : VIZ_ACTOR_SPARK, g,
                                 VIZ_ONSET_GROUPS, rise[g]);
+                v->actors[slot].x = viz_pan_to_x(v->pan[g], actor_jitter(v));
             }
             v->actor_cool[g] = viz_actor_cooldown(g, VIZ_ONSET_GROUPS);
         }
@@ -175,6 +192,8 @@ actors_update(VizView *v, float dt, int nb, int section_fired,
             if (slot >= 0) {
                 viz_actor_spawn(&v->actors[slot], &v->rng, VIZ_ACTOR_SPARK,
                                 VIZ_ONSET_GROUPS - 1, VIZ_ONSET_GROUPS, v->tick);
+                v->actors[slot].x = viz_pan_to_x(v->pan[VIZ_ONSET_GROUPS - 1],
+                                                 actor_jitter(v));
                 v->actor_cool[VIZ_ONSET_GROUPS] = ACTOR_COOL_TICK;
             }
         }
@@ -260,6 +279,15 @@ viz_view_update(VizView *v, const VizSettings *s, float dt, int active,
     playback_get_samples(v->samples, VIZ_FFT_N);
     viz_spectrum(v->samples, VIZ_FFT_N, v->target, nb,
                  (float)s->gain_pct / 100.0f);
+    /* Stereo placement: each side's spectrum, read raw (no smoothing) so an
+     * actor lands where the sound was at its onset. */
+    playback_get_samples_lr(v->samples_l, v->samples_r, VIZ_FFT_N);
+    viz_spectrum(v->samples_l, VIZ_FFT_N, v->target_l, nb,
+                 (float)s->gain_pct / 100.0f);
+    viz_spectrum(v->samples_r, VIZ_FFT_N, v->target_r, nb,
+                 (float)s->gain_pct / 100.0f);
+    viz_pan(v->target_l, v->target_r, nb, v->pan, VIZ_ONSET_GROUPS);
+    viz_pan(v->target_l, v->target_r, nb, &v->pan_all, 1);
     viz_smooth(v->bars, v->target, nb, (float)s->smooth_pct / 100.0f);
     /* The fractal works from the compressed copy, so quiet bands register. */
     viz_compress(v->cbars, v->bars, nb, VIZ_COMPRESS);
