@@ -175,15 +175,82 @@ viz_hue_rgb(float hue, unsigned char *r, unsigned char *g, unsigned char *b)
 }
 
 void
-viz_fractal_c(float bass, float mid, double t, float *cr, float *ci)
+viz_fractal_c(float bass, float mid, float treble, float *cr, float *ci)
 {
-    *cr = -0.7f + 0.25f * (float)sin(t * 0.31) + 0.12f * bass;
-    *ci = 0.27f + 0.20f * (float)cos(t * 0.23) + 0.10f * mid;
+    /* No clock: the constant is a pure function of the band energies, so a
+     * steady sound holds a steady shape. Inputs are 0..1, output stays inside
+     * the bounded Julia range around -0.7 + 0.27i. */
+    *cr = -0.7f + 0.15f * bass + 0.05f * treble;
+    *ci = 0.27f + 0.10f * mid - 0.05f * treble;
 }
 
-/* Seahorse valley, a boundary point where the Mandelbrot detail is rich. */
-#define SEAHORSE_RE -0.7436438870f
-#define SEAHORSE_IM  0.1318259043f
+float
+viz_gate(float level, float floor)
+{
+    float t = (level - floor) * 4.0f;
+
+    if (t <= 0.0f)
+        return 0.0f;
+    if (t >= 1.0f)
+        return 1.0f;
+    return t * t * (3.0f - 2.0f * t);
+}
+
+float
+viz_flux(const float *prev, const float *cur, int n)
+{
+    float sum = 0.0f;
+    int i;
+
+    for (i = 0; i < n; ++i) {
+        const float d = cur[i] - prev[i];
+        if (d > 0.0f)
+            sum += d;
+    }
+    /* Mean positive rise per bar, scaled so a strong onset reaches 1. */
+    if (n <= 0)
+        return 0.0f;
+    sum = sum / (float)n * 4.0f;
+    return sum > 1.0f ? 1.0f : sum;
+}
+
+float
+viz_centroid(const float *bars, int n)
+{
+    float wsum = 0.0f, total = 0.0f;
+    int i;
+
+    if (n < 2)
+        return 0.5f;
+    for (i = 0; i < n; ++i) {
+        wsum += (float)i * bars[i];
+        total += bars[i];
+    }
+    if (total < 1e-6f)
+        return 0.5f;
+    return wsum / total / (float)(n - 1);
+}
+
+int
+viz_ring_bin(float r, int nbars)
+{
+    /* Log-spaced: the inner rings cover the bass bars and the outer rings the
+     * treble, with the same number of bars spread across the radius. */
+    float f;
+    int b;
+
+    if (nbars < 1)
+        return 0;
+    if (r < 0.0f)
+        r = 0.0f;
+    if (r > 1.0f)
+        r = 1.0f;
+    f = log2f(1.0f + 15.0f * r) / 4.0f; /* 0..1 */
+    b = (int)(f * (float)nbars);
+    if (b >= nbars)
+        b = nbars - 1;
+    return b < 0 ? 0 : b;
+}
 
 float
 viz_smooth_mu(int n, float zx, float zy)
@@ -251,18 +318,6 @@ viz_kaleido(float re, float im, int segs, float rot, float *ore, float *oim)
     a += rot;
     *ore = r * cosf(a);
     *oim = r * sinf(a);
-}
-
-void
-viz_drift(double t, float *cx, float *cy, float *zoom)
-{
-    const double phase = fmod(t * 0.05, 1.0);
-    const float tri = 1.0f - fabsf(2.0f * (float)phase - 1.0f); /* 0..1..0 */
-    const float ease = tri * tri * (3.0f - 2.0f * tri);
-
-    *zoom = exp2f(-6.0f * tri);
-    *cx = SEAHORSE_RE * ease;
-    *cy = SEAHORSE_IM * ease;
 }
 
 void

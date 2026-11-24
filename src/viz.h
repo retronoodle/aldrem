@@ -39,9 +39,24 @@ void viz_smooth(float *cur, const float *target, int n, float smooth);
 /* Converts a hue in 0..1 (wrapping) with full saturation and value to RGB 0..255. */
 void viz_hue_rgb(float hue, unsigned char *r, unsigned char *g, unsigned char *b);
 
-/* Julia-set constant for the fractal mode, driven by bass and mid energy in
- * 0..1 and a running time in seconds. */
-void viz_fractal_c(float bass, float mid, double t, float *cr, float *ci);
+/* Julia-set constant for the fractal mode, a pure function of bass, mid and
+ * treble energy in 0..1. No clock: a steady sound gives a steady shape. */
+void viz_fractal_c(float bass, float mid, float treble, float *cr, float *ci);
+
+/* Silence gate: 0 at or below floor, rising smoothly to 1 a quarter above it. */
+float viz_gate(float level, float floor);
+
+/* Spectral flux: mean positive rise per bar between two frames, scaled and
+ * clamped to 0..1. Zero when the spectrum is steady or only falling. */
+float viz_flux(const float *prev, const float *cur, int n);
+
+/* Spectral centroid: energy-weighted mean bar position in 0..1 (0 = bass,
+ * 1 = treble). Returns 0.5 when there is no energy. */
+float viz_centroid(const float *bars, int n);
+
+/* Maps a normalised radius 0..1 (centre to rim) to a bar index in 0..nbars-1,
+ * log-spaced so bass sits at the centre. */
+int viz_ring_bin(float r, int nbars);
 
 /* Smooth escape count for colouring: n iterations and |z| at escape give a
  * fractional value, so colour bands blend instead of stepping. */
@@ -58,10 +73,6 @@ float viz_phoenix_mu(float zx, float zy, float cr, float ci, float p, int iter);
 /* Folds the plane into segs mirrored wedges around the origin (segs >= 1),
  * with the wedges rotated by rot radians. Radius is preserved. */
 void viz_kaleido(float re, float im, int segs, float rot, float *ore, float *oim);
-
-/* View centre and zoom for the fractal drifting toward the seahorse valley and
- * back, one cycle every 20 s. zoom stays within 1/64..1. */
-void viz_drift(double t, float *cx, float *cy, float *zoom);
 
 /* Beat tracker. avg is a slow bass average and kick a 0..1 envelope that jumps
  * on a bass onset and decays. Both are updated in place. Call once per frame. */

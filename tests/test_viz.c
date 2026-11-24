@@ -116,10 +116,16 @@ main(void)
     CHECK(r == 255 && g == 0 && b == 0, "hue wraps at 1");
 
     /* Fractal constant stays inside a range where the set is interesting. */
-    viz_fractal_c(0.0f, 0.0f, 0.0, &cr, &ci);
+    viz_fractal_c(0.0f, 0.0f, 0.0f, &cr, &ci);
     CHECK(fabsf(cr) < 1.0f && fabsf(ci) < 1.0f, "fractal c is bounded");
-    viz_fractal_c(1.0f, 1.0f, 12.3, &cr, &ci);
+    viz_fractal_c(1.0f, 1.0f, 1.0f, &cr, &ci);
     CHECK(fabsf(cr) < 1.0f && fabsf(ci) < 1.0f, "fractal c stays bounded under load");
+    viz_fractal_c(0.4f, 0.3f, 0.2f, &cr, &ci);
+    {
+        float cr2, ci2;
+        viz_fractal_c(0.4f, 0.3f, 0.2f, &cr2, &ci2);
+        CHECK(cr == cr2 && ci == ci2, "fractal c is a pure function of the bands");
+    }
 
     /* Smooth escape count: |z| = 2 gives n + 1, |z| = 4 gives n. */
     CHECK(fabsf(viz_smooth_mu(5, 2.0f, 0.0f) - 6.0f) < 1e-4f, "smooth mu at |z|=2");
@@ -145,26 +151,63 @@ main(void)
         CHECK(fabsf(sqrtf(a1x * a1x + a1y * a1y) - 2.0f) < 1e-4f, "kaleido keeps radius");
     }
 
-    /* Drift: zoom stays in 1/64..1, starts at 1, reaches the deep end, and moves
-     * smoothly with no jumps. */
+    /* Silence gate: closed at the floor, open well above it, never falls as the
+     * level rises. */
     {
-        float cx, cy, z, prev_z = 0.0f, max_step = 0.0f;
-        double tt;
-        int bad = 0;
-        viz_drift(0.0, &cx, &cy, &z);
-        CHECK(fabsf(z - 1.0f) < 1e-5f && fabsf(cx) < 1e-6f, "drift starts at full view");
-        viz_drift(10.0, &cx, &cy, &z);
-        CHECK(fabsf(z - 1.0f / 64.0f) < 1e-5f, "drift reaches deep zoom at half cycle");
-        for (tt = 0.0; tt < 40.0; tt += 0.01) {
-            viz_drift(tt, &cx, &cy, &z);
-            if (z < 1.0f / 64.0f - 1e-5f || z > 1.0f + 1e-5f)
-                bad++;
-            if (tt > 0.0 && fabsf(z - prev_z) > max_step)
-                max_step = fabsf(z - prev_z);
-            prev_z = z;
+        float prev = -1.0f;
+        int mono = 1, i;
+        CHECK(viz_gate(0.0f, 0.02f) == 0.0f, "gate is shut in silence");
+        CHECK(viz_gate(0.02f, 0.02f) == 0.0f, "gate is shut at the floor");
+        CHECK(viz_gate(0.5f, 0.02f) == 1.0f, "gate is open well above the floor");
+        for (i = 0; i <= 100; ++i) {
+            const float g = viz_gate((float)i / 100.0f, 0.02f);
+            if (g < prev)
+                mono = 0;
+            prev = g;
         }
-        CHECK(bad == 0, "drift zoom stays in range");
-        CHECK(max_step < 0.01f, "drift zoom is continuous");
+        CHECK(mono, "gate is monotonic");
+    }
+
+    /* Spectral flux: steady is 0, a rise is positive, a pure fall is 0. */
+    {
+        float a[VIZ_BARS_MAX], bb[VIZ_BARS_MAX];
+        int i;
+        for (i = 0; i < 16; ++i) {
+            a[i] = 0.3f;
+            bb[i] = 0.3f;
+        }
+        CHECK(viz_flux(a, bb, 16) == 0.0f, "flux is zero for a steady spectrum");
+        for (i = 0; i < 16; ++i)
+            bb[i] = 0.6f;
+        CHECK(viz_flux(a, bb, 16) > 0.0f, "flux is positive on a rise");
+        CHECK(viz_flux(bb, a, 16) == 0.0f, "flux is zero on a pure fall");
+        CHECK(viz_flux(a, bb, 16) <= 1.0f, "flux stays in 0..1");
+    }
+
+    /* Centroid: bass-only is low, treble-only is high, silence is centred. */
+    {
+        float lo[VIZ_BARS_MAX] = {0}, hi[VIZ_BARS_MAX] = {0}, none[VIZ_BARS_MAX] = {0};
+        lo[0] = 1.0f;
+        hi[31] = 1.0f;
+        CHECK(viz_centroid(lo, 32) < 0.05f, "centroid is low for bass");
+        CHECK(viz_centroid(hi, 32) > 0.95f, "centroid is high for treble");
+        CHECK(fabsf(viz_centroid(none, 32) - 0.5f) < 1e-6f, "centroid is centred in silence");
+    }
+
+    /* Ring bin: always a valid bar, rises with radius, bass at the centre. */
+    {
+        int prev = -1, mono = 1, i;
+        CHECK(viz_ring_bin(0.0f, 24) == 0, "centre ring reads the lowest bar");
+        CHECK(viz_ring_bin(1.0f, 24) == 23, "rim ring reads the highest bar");
+        CHECK(viz_ring_bin(5.0f, 24) == 23 && viz_ring_bin(-1.0f, 24) == 0,
+              "ring bin clamps out-of-range radius");
+        for (i = 0; i <= 100; ++i) {
+            const int b = viz_ring_bin((float)i / 100.0f, 24);
+            if (b < prev || b < 0 || b > 23)
+                mono = 0;
+            prev = b;
+        }
+        CHECK(mono, "ring bin is monotonic and in range");
     }
 
     /* Beat: a steady bass leaves no kick; an onset jumps it and it decays. */

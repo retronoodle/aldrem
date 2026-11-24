@@ -2,7 +2,6 @@
 #include "visualizer.h"
 
 #include <math.h>
-#include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -13,6 +12,7 @@
 #define FRACTAL_W    192
 #define FRACTAL_H    108
 #define FRACTAL_ITER 40
+#define TAU_F        6.28318530718f
 
 static const char *const viz_mode_names[VIZ_MODE_COUNT] = {
     "Spectrum", "Wave", "Fractal"
@@ -25,58 +25,31 @@ struct VizView {
     float pts[2 * VIZ_FFT_N];   /* waveform polyline, x/y pairs */
     unsigned int pixels[FRACTAL_W * FRACTAL_H];
     SDL_Texture *fractal;       /* streaming texture, NULL if unavailable */
-    double t;                   /* animation clock, seconds */
+    int dark;                   /* last fractal frame was fully black */
     float bass, mid;            /* band energy driving the fractal, 0..1 */
     float treble;               /* top-quarter band energy, 0..1 */
+    float level;                /* mean of all bars, 0..1: overall loudness */
+    float master;               /* silence-gated level, 0 in silence */
+    float centroid;             /* smoothed spectral centroid, 0..1 */
+    float prev_bars[VIZ_BARS_MAX]; /* last frame's bars, for spectral flux */
+    int primed;                 /* prev_bars holds a frame from this visible run */
+    float flux;                 /* spectral flux envelope, 0..1 */
+    float ripple;               /* treble driving the ripple, 0 under reduce_motion */
+    float rot;                 /* kaleidoscope rotation, driven by flux */
     float bass_avg;             /* slow bass average the beat tracker uses */
     float kick;                 /* beat envelope, 0..1, jumps on bass onsets */
-    float mid_avg;              /* slow mid average: what counts as a swell */
-    float mid_env;              /* mid swell envelope: the entity's presence */
     float trail_decay;          /* per-frame keep factor for fractal trails */
     float phx[3];               /* Phoenix shape now: c real, c imag, p */
-    int phx_preset;             /* PHX_PRESETS entry the shape is pulled to */
-    float phx_wf[3], phx_wp[3]; /* random wander rates and phases */
-    float phx_cool;             /* seconds before a kick may switch preset */
-    unsigned int phx_rng;       /* xorshift state: random start and jumps */
     struct MpAnim mode_anim[VIZ_MODE_COUNT];
     struct MpAnim fs_anim;
 };
 
-/* Phoenix parameter starting points (c real, c imag, p). Each one gives a
- * different silhouette; the shape eases between them on kicks. */
-#define PHX_PRESET_N 6
-static const float PHX_PRESETS[PHX_PRESET_N][3] = {
-    {0.56667f,  0.00f, -0.50f}, /* classic Phoenix */
-    {0.40f,     0.10f, -0.60f},
-    {0.60f,    -0.12f, -0.45f},
-    {0.25f,     0.20f, -0.80f},
-    {0.50f,    -0.20f, -0.30f},
-    {0.35f,     0.00f, -0.85f},
-};
+/* Phoenix resting parameters (c real, c imag, p): the classic silhouette. The
+ * music pulls the shape away from it; with no music it is not drawn at all. */
+static const float PHX_REST[3] = {0.56667f, 0.00f, -0.50f};
 /* Safe box the shape stays in, so it never collapses to blank or solid. */
 static const float PHX_LO[3] = {0.20f, -0.25f, -0.90f};
 static const float PHX_HI[3] = {0.65f,  0.25f,  0.10f};
-/* How far the random wander swings each parameter. */
-static const float PHX_WANDER[3] = {0.08f, 0.08f, 0.12f};
-
-static float
-phx_rand01(unsigned int *s)
-{
-    *s ^= *s << 13;
-    *s ^= *s >> 17;
-    *s ^= *s << 5;
-    return (float)(*s & 0xFFFFFFu) / 16777216.0f;
-}
-
-static int
-phx_pick(unsigned int *s, int avoid)
-{
-    int n = (int)(phx_rand01(s) * PHX_PRESET_N);
-
-    if (n >= PHX_PRESET_N)
-        n = PHX_PRESET_N - 1;
-    return (n == avoid) ? (n + 1) % PHX_PRESET_N : n;
-}
 
 VizView *
 viz_view_create(SDL_Renderer *ren)
@@ -94,18 +67,9 @@ viz_view_create(SDL_Renderer *ren)
             SDL_SetTextureScaleMode(v->fractal, SDL_ScaleModeLinear);
     }
 
-    /* Every launch starts with a different creature: random seed, random
-     * preset, random wander rates. The state is set here, not eased from
-     * zero, so the first frame already shows a finished shape. */
-    v->phx_rng = ((unsigned int)SDL_GetTicks() * 2654435761u) ^ (unsigned int)(uintptr_t)v;
-    if (!v->phx_rng)
-        v->phx_rng = 0x9E3779B9u;
-    v->phx_preset = phx_pick(&v->phx_rng, -1);
-    for (i = 0; i < 3; ++i) {
-        v->phx_wf[i] = 0.10f + 0.20f * phx_rand01(&v->phx_rng);
-        v->phx_wp[i] = 6.2831853f * phx_rand01(&v->phx_rng);
-        v->phx[i] = PHX_PRESETS[v->phx_preset][i];
-    }
+    for (i = 0; i < 3; ++i)
+        v->phx[i] = PHX_REST[i];
+    v->trail_decay = 1.0f;
     return v;
 }
 
@@ -124,14 +88,17 @@ viz_view_update(VizView *v, const VizSettings *s, float dt, int active,
                 int reduce_motion)
 {
     int nb = s->bars, q, h, i;
-    float sum_bass = 0.0f, sum_mid = 0.0f, sum_treble = 0.0f;
+    float sum_bass = 0.0f, sum_mid = 0.0f, sum_treble = 0.0f, sum_all = 0.0f;
+    float centre, flux_now, rise_k;
 
-    /* Hidden views do no work: no sample copy, no FFT, no clock. */
-    if (!active)
+    /* Hidden views do no work: no sample copy, no FFT. */
+    if (!active) {
+        /* Forget the spectrum and flux so reopening the tab starts clean. */
+        v->primed = 0;
+        v->flux = 0.0f;
         return;
+    }
 
-    if (!reduce_motion)
-        v->t += dt;
     playback_get_samples(v->samples, VIZ_FFT_N);
     viz_spectrum(v->samples, VIZ_FFT_N, v->target, nb,
                  (float)s->gain_pct / 100.0f);
@@ -154,63 +121,70 @@ viz_view_update(VizView *v, const VizSettings *s, float dt, int active,
     v->treble = q ? sum_treble / (float)q : 0.0f;
     viz_beat(&v->bass_avg, &v->kick, v->bass, dt);
 
-    /* The entity follows swells: mid energy rising above its own slow average,
-     * which is what a vocal or a solo does. A held note settles back to
-     * nothing, so the creature pulses with the phrasing instead of sitting on. */
-    {
-        const float ka = 1.0f - expf(-dt * 0.5f);
-        float rise = (v->mid - v->mid_avg) * 4.0f;
-        float k;
+    /* Overall loudness, gated: below the noise floor the picture is exactly
+     * black, so silence and pause leave no shape and no movement. */
+    for (i = 0; i < nb; ++i)
+        sum_all += v->bars[i];
+    v->level = nb ? sum_all / (float)nb : 0.0f;
+    v->master = viz_gate(v->level, 0.03f);
 
-        rise = rise < 0.0f ? 0.0f : (rise > 1.0f ? 1.0f : rise);
-        v->mid_avg += (v->mid - v->mid_avg) * ka;
-        k = rise > v->mid_env ? 0.6f : 1.0f - expf(-dt * 1.5f);
-        v->mid_env += (rise - v->mid_env) * k;
-    }
-    v->trail_decay = expf(-dt * 5.0f);
+    /* Spectral flux: how much the spectrum is rising right now. A steady tone
+     * gives zero, so the kaleidoscope stops; each new note turns it. The
+     * envelope lets a rise ring out briefly rather than cutting off. */
+    flux_now = v->primed ? viz_flux(v->prev_bars, v->bars, nb) : 0.0f;
+    memcpy(v->prev_bars, v->bars, (size_t)nb * sizeof v->bars[0]);
+    v->primed = 1;
+    v->flux = flux_now > v->flux ? flux_now : v->flux * expf(-dt * 6.0f);
 
+    /* Centroid is smoothed so the hue glides instead of flickering. */
+    centre = viz_centroid(v->bars, nb);
+    rise_k = 1.0f - expf(-dt * 2.0f);
+    v->centroid += (centre - v->centroid) * rise_k;
+
+    /* Trails fade faster as the music drops, so silence clears the screen. */
+    v->trail_decay = expf(-dt * (5.0f + 25.0f * (1.0f - v->master)));
+
+    /* Under reduce_motion nothing moves on its own: the shape and brightness
+     * still follow the bands, but the kick, flux rotation and ripple are off. */
     if (reduce_motion) {
-        /* Fractal holds still without audio drive; the creature sits at its
-         * resting shape, since it has no swell to follow. */
-        v->bass = v->mid = 0.0f;
-        v->treble = v->kick = v->mid_env = 0.0f;
+        v->kick = 0.0f;
+        v->flux = 0.0f;
+        v->ripple = 0.0f;
+    } else {
+        v->ripple = v->treble;
+        /* Rotation only ever advances on flux; wrapped to one turn so float
+         * precision holds over long sessions (2*pi is a symmetry of the fold). */
+        v->rot += v->flux * dt * 1.5f;
+        if (v->rot > TAU_F)
+            v->rot -= TAU_F;
     }
 
-    /* Phoenix shape: a slow random wander around the current preset, nudged
-     * by the swell (mid_env) and the mids, with a kick jumping to a new
-     * preset. Everything eases, so changes morph rather than snap. Under
-     * reduce_motion the clock is frozen and the audio terms are zero, so the
-     * shape holds still. */
-    v->phx_cool = v->phx_cool > dt ? v->phx_cool - dt : 0.0f;
-    if (v->kick > 0.7f && v->phx_cool <= 0.0f) {
-        v->phx_preset = phx_pick(&v->phx_rng, v->phx_preset);
-        v->phx_cool = 1.5f;
-    }
+    /* Phoenix shape: pulled from its resting silhouette by the mids and the
+     * treble, and eased so changes morph rather than snap. */
     {
         const float ease = 1.0f - expf(-dt * 1.2f);
         const float nudge[3] = {
-            0.06f * v->mid_env, 0.08f * v->mid, -0.15f * v->mid_env
+            0.10f * v->mid, 0.08f * v->mid, -0.15f * v->treble
         };
-        int i;
+        int k;
 
-        for (i = 0; i < 3; ++i) {
-            const float base = PHX_PRESETS[v->phx_preset][i];
-            const float wander = PHX_WANDER[i] * sinf((float)v->t * v->phx_wf[i]
-                                                      + v->phx_wp[i]);
-            float tgt = base + wander + nudge[i];
+        for (k = 0; k < 3; ++k) {
+            float tgt = PHX_REST[k] + nudge[k];
 
-            tgt = tgt < PHX_LO[i] ? PHX_LO[i] : (tgt > PHX_HI[i] ? PHX_HI[i] : tgt);
-            v->phx[i] += (tgt - v->phx[i]) * ease;
+            tgt = tgt < PHX_LO[k] ? PHX_LO[k] : (tgt > PHX_HI[k] ? PHX_HI[k] : tgt);
+            v->phx[k] += (tgt - v->phx[k]) * ease;
         }
     }
 }
 
-/* Fractal look. The Julia layer is rippled by the treble and folded into a
- * kaleidoscope; a Phoenix creature sits on top, always present and reshaped by
- * the clock and the mids; each frame keeps a fading copy of the last one. */
+/* Fractal look. Every visible element is a response to the music, with no
+ * clock: the Julia layer is rippled by the treble and folded into a
+ * kaleidoscope whose rotation is driven by spectral flux; its rings take their
+ * brightness from the spectrum, bass at the centre and treble at the rim. The
+ * Phoenix creature sits on top, present only while the mids are. Brightness
+ * follows the gated level, and each frame keeps a fading copy of the last. */
 #define KALEIDO_SEGS 6
 #define PHX_HALF     1.6f     /* half-height of the Phoenix view */
-#define HUE_DRIFT     0.02f /* palette turns per second */
 #define RIPPLE_AMP    0.04f
 
 /* Colour for an escape count. mu < 0 is inside the set, drawn black. */
@@ -236,54 +210,64 @@ static void
 fractal_render(VizView *v, const VizSettings *s)
 {
     const float aspect = (float)FRACTAL_W / (float)FRACTAL_H;
-    const float t = (float)v->t;
-    const float hue = (float)s->hue_pct / 100.0f + t * HUE_DRIFT;
-    /* The creature's shape (c, p) is eased in viz_view_update, so it keeps
-     * morphing with no audio and reacts to swells and kicks. */
-    const float breathe = 0.5f + 0.5f * sinf(t * 0.35f);
-    /* The view wanders across the plane, so the shape keeps changing. */
-    const float phx_cx = 0.3f * sinf(t * 0.2f);
-    const float phx_cy = 0.25f * cosf(t * 0.17f);
-    const float phx_half = PHX_HALF * (1.0f - 0.3f * breathe - 0.3f * v->mid_env);
-    float mask = 0.35f + 0.65f * v->mid_env;
-    float cr, ci, cx, cy, zoom;
+    /* Hue follows the centroid (dark sound one end of the wheel, bright the
+     * other) on top of the user's offset. No time term, so no drift. */
+    const float hue = (float)s->hue_pct / 100.0f + 0.6f * v->centroid;
+    /* Brightness: the gated level, with a short punch on each bass onset. */
+    const float lum = v->master * (1.0f + 0.5f * v->kick);
+    /* Louder pushes in; a bass onset punches in briefly. */
+    const float zoom = (1.5f - 0.6f * v->level) * (1.0f - 0.2f * v->kick);
+    const float phx_half = PHX_HALF * (1.0f - 0.3f * v->level);
+    /* The creature's presence is the mids, so it appears with vocals and solos
+     * and is absent in a held silence. */
+    const float phx_on = lum * viz_gate(v->mid, 0.03f);
+    const float rot = v->rot;
+    unsigned int any = 0;
+    float cr, ci;
     int x, y;
 
-    /* Smoothstep: the entity fades in and out rather than popping. */
-    mask = mask < 0.0f ? 0.0f : (mask > 1.0f ? 1.0f : mask);
-    mask = mask * mask * (3.0f - 2.0f * mask);
+    /* Silence: the last frame was black and the level is gated to zero, so
+     * there is nothing to draw and the texture already shows black. */
+    if (v->master <= 0.0f && v->dark)
+        return;
 
-    viz_fractal_c(v->bass, v->mid, v->t, &cr, &ci);
-    viz_drift(v->t, &cx, &cy, &zoom);
-    zoom *= (1.0f - 0.25f * v->bass) * (1.0f - 0.35f * v->kick);
+    viz_fractal_c(v->bass, v->mid, v->treble, &cr, &ci);
 
     for (y = 0; y < FRACTAL_H; ++y) {
         const float w = ((float)y / FRACTAL_H - 0.5f) * 2.0f;
 
         for (x = 0; x < FRACTAL_W; ++x) {
             const float u = ((float)x / FRACTAL_W - 0.5f) * 2.0f;
-            const float re = cx + u * zoom * aspect;
-            const float im = cy + w * zoom;
-            const float amp = RIPPLE_AMP * v->treble * zoom;
-            const float rre = re + amp * sinf(im * 9.0f + t * 1.7f);
-            const float rim = im + amp * sinf(re * 7.0f - t * 1.3f);
+            const float re = u * zoom * aspect;
+            const float im = w * zoom;
+            const float amp = RIPPLE_AMP * v->ripple * zoom;
+            const float rre = re + amp * sinf(im * 9.0f + rot * 2.0f);
+            const float rim = im + amp * sinf(re * 7.0f - rot * 1.5f);
+            /* Ring: centre is bass, rim is treble. Each ring glows with the bar
+             * its radius maps to, so the picture is the spectrum laid out. */
+            const float ring = v->bars[viz_ring_bin(
+                sqrtf(u * u + w * w) * 0.70710678f, s->bars)];
             const size_t idx = (size_t)y * FRACTAL_W + (size_t)x;
-            float fre, fim, r, g, b, sr, sg, sb, pr, pg, pb;
+            float fre, fim, r, g, b, sr, sg, sb, pr, pg, pb, k;
             unsigned int prev;
 
-            viz_kaleido(rre, rim, KALEIDO_SEGS, t * 0.05f, &fre, &fim);
+            viz_kaleido(rre, rim, KALEIDO_SEGS, rot, &fre, &fim);
             mu_rgb(viz_julia_mu(fre, fim, cr, ci, FRACTAL_ITER), hue,
                    &r, &g, &b);
+            k = lum * ring;
+            r *= k;
+            g *= k;
+            b *= k;
 
-            if (mask > 0.01f) {
-                mu_rgb(viz_phoenix_mu(phx_cx + u * phx_half * aspect,
-                                      phx_cy + w * phx_half,
+            if (phx_on > 0.01f) {
+                mu_rgb(viz_phoenix_mu(u * phx_half * aspect, w * phx_half,
                                       v->phx[0], v->phx[1], v->phx[2],
                                       FRACTAL_ITER),
                        hue + 0.5f, &sr, &sg, &sb);
-                r += mask * sr;
-                g += mask * sg;
-                b += mask * sb;
+                k = phx_on * ring;
+                r += k * sr;
+                g += k * sg;
+                b += k * sb;
             }
             r = fminf(r, 255.0f);
             g = fminf(g, 255.0f);
@@ -302,8 +286,10 @@ fractal_render(VizView *v, const VizSettings *s)
                 | ((unsigned)r << 16)
                 | ((unsigned)g << 8)
                 | (unsigned)b;
+            any |= v->pixels[idx] & 0x00FFFFFFu;
         }
     }
+    v->dark = (any == 0);
     SDL_UpdateTexture(v->fractal, NULL, v->pixels, FRACTAL_W * 4);
 }
 
