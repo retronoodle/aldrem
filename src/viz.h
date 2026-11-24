@@ -164,6 +164,13 @@ void viz_onset(const float *bars, const float *avg, int nbars, float *rise, int 
 /* Per-band stereo balance -1 (all left) .. +1 (all right), 0 centred or silent,
  * from the left and right bar arrays over the same bands as viz_onset. */
 void viz_pan(const float *bars_l, const float *bars_r, int nbars, float *pan, int groups);
+/* Balance -1..1 from one left and one right level; 0 when both are silent. */
+float viz_balance(float l, float r);
+/* Linear mix of a left and a right value across the stage: u -1 is the left
+ * edge, +1 the right. Equal inputs return that value exactly. */
+float viz_side_lerp(float left, float right, float u);
+/* Stage brightness multiplier, 1 + k * pan * u clamped to 0.6..1.4. */
+float viz_side_mult(float u, float pan, float k);
 /* Stage x for an actor from a balance, a -1..1 jitter and the mix's width
  * 0..1 (a wide mix spreads the burst, a mono mix pulls it tight), kept within ±0.7. */
 float viz_pan_to_x(float pan, float jitter, float width);
