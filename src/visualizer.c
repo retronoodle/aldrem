@@ -15,12 +15,12 @@
 #define TAU_F        6.28318530718f
 
 /* Stereo nudges. Each is small, so mono music looks as it did before. */
-#define SIDE_LUM     0.3f   /* how much a side's pan brightens its half of the Julia layer */
-#define SIDE_HUE     0.08f  /* hue shift across the width of a wide mix */
-#define PHX_PAN      0.25f  /* how far the Phoenix leans toward the mids' side */
-#define WANDER_PAN   0.02f  /* how far a kick flings the constant toward the bass's side */
-#define ROT_PAN      0.15f  /* how much a side's pan speeds up or slows the kaleidoscope */
-#define ACTOR_HUE_PAN 0.08f /* hue shift an actor takes from its side */
+#define SIDE_LUM     0.5f   /* how much a side's pan brightens its half of the Julia layer */
+#define SIDE_HUE     0.16f  /* hue shift across the width of a wide mix */
+#define PHX_PAN      0.45f  /* how far the Phoenix leans toward the mids' side */
+#define WANDER_PAN   0.04f  /* how far a kick flings the constant toward the bass's side */
+#define ROT_PAN      0.30f  /* how much a side's pan speeds up or slows the kaleidoscope */
+#define ACTOR_HUE_PAN 0.15f /* hue shift an actor takes from its side */
 
 static const char *const viz_mode_names[VIZ_MODE_COUNT] = {
     "Spectrum", "Wave", "Fractal", "Stereo", "Scope"
@@ -348,7 +348,7 @@ viz_view_update(VizView *v, const VizSettings *s, float dt, int active,
     viz_pan(v->target_l, v->target_r, nb, &v->pan_all, 1);
     {
         /* Eased balance for the fractal's side effects; reduce motion holds centre. */
-        const float ease = 1.0f - expf(-dt * 2.0f);
+        const float ease = 1.0f - expf(-dt * 3.0f);
         const float tgt = reduce_motion ? 0.0f : v->pan_all;
         const float tgt_mid = reduce_motion ? 0.0f
                                             : 0.5f * (v->pan[2] + v->pan[3]);
@@ -691,8 +691,8 @@ fractal_render(VizView *v, const VizSettings *s)
                     + TICK_LUM * viz_side_lerp(v->tick_l, v->tick_r, u);
 
                 mu_rgb(viz_julia_mu(fre, fim, cr, ci, FRACTAL_ITER),
-                       hue + SIDE_HUE * u * v->width, &r, &g, &b);
-                k = lum_px * ring * viz_side_mult(u, v->pan_s, SIDE_LUM);
+                       hue + SIDE_HUE * u * fabsf(u) * v->width, &r, &g, &b);
+                k = lum_px * ring * viz_side_mult(u * fabsf(u), v->pan_s, SIDE_LUM);
             }
             r *= k;
             g *= k;
