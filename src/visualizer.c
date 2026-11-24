@@ -15,7 +15,7 @@
 #define TAU_F        6.28318530718f
 
 static const char *const viz_mode_names[VIZ_MODE_COUNT] = {
-    "Spectrum", "Wave", "Fractal"
+    "Spectrum", "Wave", "Fractal", "Stereo", "Scope"
 };
 
 struct VizView {
@@ -29,6 +29,11 @@ struct VizView {
     float target_r[VIZ_BARS_MAX]; /* this frame's right bar heights, 0..1 */
     float pan[VIZ_ONSET_GROUPS];  /* per-band stereo balance -1..1, read at spawn */
     float pan_all;              /* whole-band stereo balance, places section leads */
+    float bars_l[VIZ_BARS_MAX]; /* smoothed left bar heights, for the Stereo mode */
+    float bars_r[VIZ_BARS_MAX]; /* smoothed right bar heights */
+    float cbars_l[VIZ_BARS_MAX]; /* left bars lifted for quiet music, for the fractal shape */
+    float cbars_r[VIZ_BARS_MAX]; /* right bars lifted for quiet music */
+    float width;                /* eased stereo width, 0 mono .. 1 wide */
     float pts[2 * VIZ_FFT_N];   /* waveform polyline, x/y pairs */
     unsigned int pixels[FRACTAL_W * FRACTAL_H];
     SDL_Texture *fractal;       /* streaming texture, NULL if unavailable */
@@ -60,7 +65,8 @@ struct VizView {
     float tick_avg;             /* slow average of block energy, for the tick detector */
     float tick;                 /* transient envelope, 0..1, jumps on clicks */
     float prev_tick;            /* last frame's tick, to find click rises */
-    float outline[VIZ_OUTLINE_N]; /* spectrum outline the background shape follows */
+    float outline_l[VIZ_OUTLINE_N]; /* left-half outline the background shape follows */
+    float outline_r[VIZ_OUTLINE_N]; /* right-half outline */
     float shape_depth;          /* outline depth, follows the level and kicks */
     VizActor actors[VIZ_ACTORS];                /* the cast on the fractal stage */
     float actor_cool[VIZ_ONSET_GROUPS + 1];     /* spawn cooldowns per band; last is clicks */
@@ -116,7 +122,8 @@ motion_reset(VizView *v)
     v->tick_avg = 0.0f;
     v->tick = 0.0f;
     v->prev_tick = 0.0f;
-    memset(v->outline, 0, sizeof v->outline);
+    memset(v->outline_l, 0, sizeof v->outline_l);
+    memset(v->outline_r, 0, sizeof v->outline_r);
     v->shape_depth = 0.0f;
     memset(v->actors, 0, sizeof v->actors);
     memset(v->actor_cool, 0, sizeof v->actor_cool);
@@ -138,6 +145,18 @@ actor_jitter(VizView *v)
 {
     return viz_rand01(&v->rng) * 2.0f - 1.0f;
 }
+
+/* Places a freshly spawned actor at its balance, and keeps the spread so it
+ * can drift with the pan later. */
+static void
+actor_place(VizView *v, VizActor *a, float pan)
+{
+    a->jit = actor_jitter(v);
+    a->x = viz_pan_to_x(pan, a->jit, v->width);
+}
+
+/* An actor's x only moves while its sound is above this, so a lull holds it. */
+#define PAN_HOLD 0.02f
 
 /* The stage cast. A section change retires the cast and brings a new lead; a
  * new sound in a band brings an extra (bass) or a spark (anything higher); a
@@ -166,7 +185,7 @@ actors_update(VizView *v, float dt, int nb, int section_fired,
                             (int)(viz_rand01(&v->rng) * VIZ_ONSET_GROUPS)
                                 % VIZ_ONSET_GROUPS,
                             VIZ_ONSET_GROUPS, 1.0f);
-            v->actors[slot].x = viz_pan_to_x(v->pan_all, actor_jitter(v));
+            actor_place(v, &v->actors[slot], v->pan_all);
         }
     }
 
@@ -183,7 +202,7 @@ actors_update(VizView *v, float dt, int nb, int section_fired,
                 viz_actor_spawn(&v->actors[slot], &v->rng,
                                 g == 0 ? VIZ_ACTOR_EXTRA : VIZ_ACTOR_SPARK, g,
                                 VIZ_ONSET_GROUPS, rise[g]);
-                v->actors[slot].x = viz_pan_to_x(v->pan[g], actor_jitter(v));
+                actor_place(v, &v->actors[slot], v->pan[g]);
             }
             v->actor_cool[g] = viz_actor_cooldown(g, VIZ_ONSET_GROUPS);
         }
@@ -192,8 +211,7 @@ actors_update(VizView *v, float dt, int nb, int section_fired,
             if (slot >= 0) {
                 viz_actor_spawn(&v->actors[slot], &v->rng, VIZ_ACTOR_SPARK,
                                 VIZ_ONSET_GROUPS - 1, VIZ_ONSET_GROUPS, v->tick);
-                v->actors[slot].x = viz_pan_to_x(v->pan[VIZ_ONSET_GROUPS - 1],
-                                                 actor_jitter(v));
+                actor_place(v, &v->actors[slot], v->pan[VIZ_ONSET_GROUPS - 1]);
                 v->actor_cool[VIZ_ONSET_GROUPS] = ACTOR_COOL_TICK;
             }
         }
@@ -217,6 +235,13 @@ actors_update(VizView *v, float dt, int nb, int section_fired,
         if (reduce_motion)
             presence = 0.0f;
         viz_actor_step(ac, dt, rate, presence * v->master);
+        /* Drift toward the current pan while the sound is present. A lull holds
+         * the actor where it is. viz_actor_drift ignores releasing actors. */
+        if (presence * v->master > PAN_HOLD) {
+            const float pan_src = ac->kind == VIZ_ACTOR_LEAD ? v->pan_all
+                                                             : v->pan[ac->band];
+            viz_actor_drift(ac, dt, viz_pan_to_x(pan_src, ac->jit, v->width));
+        }
     }
 }
 
@@ -289,8 +314,17 @@ viz_view_update(VizView *v, const VizSettings *s, float dt, int active,
     viz_pan(v->target_l, v->target_r, nb, v->pan, VIZ_ONSET_GROUPS);
     viz_pan(v->target_l, v->target_r, nb, &v->pan_all, 1);
     viz_smooth(v->bars, v->target, nb, (float)s->smooth_pct / 100.0f);
+    viz_smooth(v->bars_l, v->target_l, nb, (float)s->smooth_pct / 100.0f);
+    viz_smooth(v->bars_r, v->target_r, nb, (float)s->smooth_pct / 100.0f);
+    {
+        /* Width eases over about a third of a second, so the stage doesn't jump. */
+        const float w_tgt = viz_width(v->samples_l, v->samples_r, VIZ_FFT_N);
+        v->width += (w_tgt - v->width) * (1.0f - expf(-dt * 3.0f));
+    }
     /* The fractal works from the compressed copy, so quiet bands register. */
     viz_compress(v->cbars, v->bars, nb, VIZ_COMPRESS);
+    viz_compress(v->cbars_l, v->bars_l, nb, VIZ_COMPRESS);
+    viz_compress(v->cbars_r, v->bars_r, nb, VIZ_COMPRESS);
 
     /* Bass and mid are the mean of the lower quarter and the next quarter of
      * the bars, which are log-spaced, so they follow low and mid frequencies. */
@@ -425,7 +459,8 @@ viz_view_update(VizView *v, const VizSettings *s, float dt, int active,
                         v->master * (0.7f + 0.2f * v->kick));
             const float d_ease = 1.0f - expf(-dt * 4.0f);
 
-            viz_outline(v->cbars, nb, v->outline, VIZ_OUTLINE_N);
+            viz_outline_pair(v->cbars_l, v->cbars_r, nb, v->outline_l,
+                             v->outline_r, VIZ_OUTLINE_N);
             v->shape_depth += (depth_tgt - v->shape_depth) * d_ease;
         }
         actors_update(v, dt, nb, section_fired, tick_rise, reduce_motion);
@@ -535,8 +570,9 @@ fractal_render(VizView *v, const VizSettings *s)
             /* The distance is a morphing superellipse with star points, drifted
              * by the kick wander; at p=2 and no depth it is the old circle. */
             const float ring = v->cbars[viz_ring_bin(
-                viz_shape_metric(u - v->wander[0], w - v->wander[1],
-                                 v->outline, VIZ_OUTLINE_N, v->shape_depth),
+                viz_shape_metric_lr(u - v->wander[0], w - v->wander[1],
+                                    v->outline_l, v->outline_r, VIZ_OUTLINE_N,
+                                    v->shape_depth),
                 s->bars)];
             const size_t idx = (size_t)y * FRACTAL_W + (size_t)x;
             float fre, fim, r, g, b, sr, sg, sb, pr, pg, pb, k;
@@ -665,6 +701,73 @@ draw_wave(struct nk_command_buffer *c, const struct MpTheme *th,
     nk_stroke_polyline(c, v->pts, n, 2.0f, th->accent_a);
 }
 
+/* Stereo: the left channel's bars grow to the left of centre, the right's to
+ * the right, bass nearest the middle and treble outward. */
+static void
+draw_stereo(struct nk_command_buffer *c, const struct MpTheme *th,
+            const VizView *v, const VizSettings *s, struct nk_rect r)
+{
+    const int nb = s->bars;
+    const float pad = r.h * 0.06f;
+    const float cx = r.x + r.w * 0.5f, bottom = r.y + r.h - pad;
+    const float hw = r.w * 0.5f - pad, hmax = r.h - 2.0f * pad;
+    const float slot = hw / (float)nb;
+    const float bw = slot * 0.72f;
+    int i;
+
+    nk_stroke_line(c, cx, r.y + pad, cx, bottom, 1.0f, th->border);
+    for (i = 0; i < nb; ++i) {
+        /* Same gradient, hue and click floor as the Spectrum bars. */
+        const float fl = fmaxf(v->bars_l[i], TICK_BAR * v->tick) * hmax;
+        const float fr = fmaxf(v->bars_r[i], TICK_BAR * v->tick) * hmax;
+        float tt, tri, hl = fl < 1.0f ? 1.0f : fl, hr = fr < 1.0f ? 1.0f : fr;
+        struct nk_color col;
+
+        tt = (float)i / (float)nb + (float)s->hue_pct / 100.0f;
+        tt -= floorf(tt);
+        tri = tt < 0.5f ? 2.0f * tt : 2.0f - 2.0f * tt;
+        col = mp_col_lerp(th->accent_a, th->accent_b, tri);
+        nk_fill_rect(c, nk_rect(cx - (float)(i + 1) * slot + (slot - bw) * 0.5f,
+                                bottom - hl, bw, hl),
+                     0.0f, col);
+        nk_fill_rect(c, nk_rect(cx + (float)i * slot + (slot - bw) * 0.5f,
+                                bottom - hr, bw, hr),
+                     0.0f, col);
+    }
+}
+
+/* Scope: a goniometer. Each sample plots side (R - L) against mid (L + R):
+ * mono sits on the vertical axis, out-of-phase on the horizontal, and a wide
+ * mix fills out. */
+static void
+draw_scope(struct nk_command_buffer *c, const struct MpTheme *th,
+           VizView *v, const VizSettings *s, struct nk_rect r)
+{
+    const float gain = (float)s->gain_pct / 100.0f;
+    const float half = (fminf(r.w, r.h) - 2.0f * r.h * 0.06f) * 0.5f;
+    const float cx = r.x + r.w * 0.5f, cy = r.y + r.h * 0.5f;
+    int i;
+
+    nk_stroke_line(c, cx - half, cy, cx + half, cy, 1.0f, th->border);
+    nk_stroke_line(c, cx, cy - half, cx, cy + half, 1.0f, th->border);
+    nk_stroke_line(c, cx - half, cy - half, cx + half, cy + half, 1.0f, th->border);
+    nk_stroke_line(c, cx - half, cy + half, cx + half, cy - half, 1.0f, th->border);
+    for (i = 0; i < VIZ_FFT_N; ++i) {
+        float l = v->samples_l[i] * gain, rr = v->samples_r[i] * gain;
+        float sx, sy;
+
+        if (l > 1.0f) l = 1.0f; else if (l < -1.0f) l = -1.0f;
+        if (rr > 1.0f) rr = 1.0f; else if (rr < -1.0f) rr = -1.0f;
+        sx = (rr - l) * 0.70710678f;
+        sy = (l + rr) * 0.70710678f;
+        if (sx > 1.0f) sx = 1.0f; else if (sx < -1.0f) sx = -1.0f;
+        if (sy > 1.0f) sy = 1.0f; else if (sy < -1.0f) sy = -1.0f;
+        v->pts[2 * i] = cx + sx * half;
+        v->pts[2 * i + 1] = cy - sy * half; /* screen y runs down */
+    }
+    nk_stroke_polyline(c, v->pts, VIZ_FFT_N, 1.5f, th->accent_a);
+}
+
 static void
 draw_fractal(struct nk_command_buffer *c, VizView *v, const VizSettings *s,
              struct nk_rect r)
@@ -696,6 +799,12 @@ viz_view_draw(struct nk_context *ctx, const struct MpTheme *th, VizView *v,
         break;
     case VIZ_FRACTAL:
         draw_fractal(c, v, s, r);
+        break;
+    case VIZ_STEREO:
+        draw_stereo(c, th, v, s, r);
+        break;
+    case VIZ_SCOPE:
+        draw_scope(c, th, v, s, r);
         break;
     default:
         draw_spectrum(c, th, v, s, r);
