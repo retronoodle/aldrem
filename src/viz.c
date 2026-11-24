@@ -707,10 +707,10 @@ viz_side_mult(float u, float pan, float k)
 {
     float m = 1.0f + k * pan * u;
 
-    if (m < 0.6f)
-        m = 0.6f;
-    else if (m > 1.4f)
-        m = 1.4f;
+    if (m < 0.5f)
+        m = 0.5f;
+    else if (m > 1.5f)
+        m = 1.5f;
     return m;
 }
 
@@ -725,11 +725,11 @@ viz_pan_to_x(float pan, float jitter, float width)
         wd = 1.0f;
     /* A wide mix fans its burst out; a mono mix keeps it tight. */
     spread = jitter * (0.05f + 0.35f * wd);
-    x = pan * 0.6f + spread;
-    if (x < -0.7f)
-        x = -0.7f;
-    else if (x > 0.7f)
-        x = 0.7f;
+    x = pan * 0.85f + spread;
+    if (x < -0.9f)
+        x = -0.9f;
+    else if (x > 0.9f)
+        x = 0.9f;
     return x;
 }
 

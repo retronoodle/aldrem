@@ -538,12 +538,12 @@ main(void)
                 float x = viz_pan_to_x(p, 0.0f, 0.0f);
                 if (x < x_prev)
                     bounded = 0;
-                if (x < -0.71f || x > 0.71f)
+                if (x < -0.91f || x > 0.91f)
                     bounded = 0;
                 x_prev = x;
             }
             CHECK(bounded, "pan maps monotonically within the stage");
-            CHECK(viz_pan_to_x(1.0f, 1.0f, 1.0f) <= 0.71f, "pan with jitter stays on stage");
+            CHECK(viz_pan_to_x(1.0f, 1.0f, 1.0f) <= 0.91f, "pan with jitter stays on stage");
         }
     }
 
@@ -574,11 +574,11 @@ main(void)
             float u;
             for (u = -1.0f; u <= 1.0f; u += 0.25f) {
                 const float m = viz_side_mult(u, p, 0.3f);
-                if (m < 0.6f || m > 1.4f)
+                if (m < 0.5f || m > 1.5f)
                     ok = 0;
             }
         }
-        CHECK(ok, "side brightness stays within 0.6..1.4");
+        CHECK(ok, "side brightness stays within 0.5..1.5");
         CHECK(viz_side_mult(1.0f, 1.0f, 0.3f) > 1.0f
               && viz_side_mult(-1.0f, 1.0f, 0.3f) < 1.0f,
               "right-heavy mix brightens the right edge");

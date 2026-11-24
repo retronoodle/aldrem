@@ -169,10 +169,10 @@ float viz_balance(float l, float r);
 /* Linear mix of a left and a right value across the stage: u -1 is the left
  * edge, +1 the right. Equal inputs return that value exactly. */
 float viz_side_lerp(float left, float right, float u);
-/* Stage brightness multiplier, 1 + k * pan * u clamped to 0.6..1.4. */
+/* Stage brightness multiplier, 1 + k * pan * u clamped to 0.5..1.5. */
 float viz_side_mult(float u, float pan, float k);
 /* Stage x for an actor from a balance, a -1..1 jitter and the mix's width
- * 0..1 (a wide mix spreads the burst, a mono mix pulls it tight), kept within ±0.7. */
+ * 0..1 (a wide mix spreads the burst, a mono mix pulls it tight), kept within ±0.9. */
 float viz_pan_to_x(float pan, float jitter, float width);
 /* Stereo width 0..1 from the left and right samples: 0 mono or silent, 1 wide or
  * out of phase. */
