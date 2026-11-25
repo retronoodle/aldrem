@@ -1550,6 +1550,7 @@ main(int argc, char **argv)
     char radio_query[256] = "";
     char radio_msg[256] = "";
     int radio_mode = RADIO_MODE_SEARCH;
+    int radio_just_opened = 0;
     unsigned char radio_checked[FAV_MAX];
 
     struct UiButtons buttons;
@@ -2033,8 +2034,12 @@ main(int argc, char **argv)
         }
         if (panel_actions & PL_ACTION_RADIO) {
             radio_msg[0] = '\0';
+            /* Drop the rows' stale selection so Play cannot act on a row
+             * left over from the last time the dialog was open. */
+            ui_radio_reset_rows(radio_checked, &radio_sel, &radio_last_click);
             radio_focus = 1;
             radio_open = 1;
+            radio_just_opened = 1;
             SDL_StartTextInput();
         }
         if (panel_actions & PL_ACTION_FIND) {
@@ -2099,6 +2104,14 @@ main(int argc, char **argv)
 
         /* Radio polls its worker thread each frame; the dialog only reads. */
         if (radio_open) {
+            /* The click that opened the dialog is still pending in Nuklear's
+             * input; without this it lands on whatever widget sits under the
+             * cursor inside the centred dialog. Clear it for this frame. */
+            if (radio_just_opened) {
+                nk_input_begin(ctx);
+                nk_input_end(ctx);
+                radio_just_opened = 0;
+            }
             if (!ui_radio_modal(ctx, ui_scale, (float)px_w, (float)px_h, radio,
                                 pl, radio_query, sizeof radio_query,
                                 radio_checked, &radio_sel, &radio_searched,
